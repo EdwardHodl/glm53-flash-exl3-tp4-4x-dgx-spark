@@ -1,0 +1,19 @@
+# spark-e116.local — fire triangle fabric (VERIFIED wiring 2026-09-21)
+# link1 -> spark-3ff5 : enp1s0f0np0 = 10.10.1.1/24
+# link2 -> gx10-2ca4  : enp1s0f1np1 = 10.10.0.1/24
+# Deployed to /etc/netplan/50-qfsp-static.yaml (root:root 600). Apply: sudo netplan apply
+network:
+  version: 2
+  ethernets:
+    enp1s0f0np0:
+      addresses:
+        - 10.10.1.1/24
+      nameservers:
+        addresses: []
+      optional: true
+    enp1s0f1np1:
+      addresses:
+        - 10.10.0.1/24
+      nameservers:
+        addresses: []
+      optional: true

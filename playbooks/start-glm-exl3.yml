@@ -1,0 +1,734 @@
+---
+# start-glm-exl3.yml — Deploy GLM-5.3-Flash-EXL3 (TR3-4bpw) across the FIRE
+# triangle: 3x DGX Spark, TP=3.
+#
+# Kit: /home/flowai/Workspaces/devops/fire/ — modeled on the sparks 2-node
+# glm kit (sparks/playbooks/glm), generalized to N=3 nodes.
+#
+# Nodes:
+#   spark-e116.local  rank 0  head    — torch.dist master + OpenAI API :8888
+#   gx10-2ca4.local   rank 1  worker  — headless mp-executor rank
+#   spark-3ff5.local  rank 2  worker  — headless mp-executor rank
+#
+# Model: Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw (~164 GiB) + DFlash2 k=7 drafter.
+# Image: glm53-exl3:e3-v151 (local build via just build-glm-exl3-rebuild, or the
+#        GHCR pull path in build-glm-exl3.yml retagged to e3-v151).
+# Engine: vLLM (glm53-flash-arm64-cu130 overlay) + mp executor TP3 (NOT Ray):
+#         rank 0 serves the API, ranks 1-2 are --headless.
+#
+# Fabric: QSFP direct-attach triangle (link A exists; links B/C are new —
+#         cabling + netplan plan in fire/README.md). FABRIC_MODE=ib is the
+#         default; `just start-glm-exl3 socket` overrides to TCP transport
+#         for bring-up before the triangle is cabled.
+#
+# Container names are fire-prefixed (fire-glm-head / fire-glm-w1 / fire-glm-w2)
+# so the kit coexists with the old sparks TP=2 stack until cutover. Port 8888 on
+# spark-e116 collides — stop the old stack (sparks: just stop-glm-exl3) before
+# firing, or run fire on a different api_port.
+#
+# Sequencing: workers (rank 1, 2) first, then head (rank 0).
+#
+# Prereqs:
+#   - EXL3 image on all 3 nodes (PLAY 2 pulls/builds; just build-glm-exl3)
+#   - EXL3 weights + DFlash2 on ALL 3 nodes (just download-glm-exl3)
+#   - >=164 GiB free on every node for weights
+#
+# Usage:
+#   ansible-playbook -i playbooks/inventory.yml playbooks/start-glm-exl3.yml
+#   just start-glm-exl3           # IB fabric (requires QSFP triangle up)
+#   just start-glm-exl3 socket    # TCP transport (bring-up fallback)
+# ============================================================
+# PLAY 1: Pre-flight — verify image, model, ports on all 3 nodes
+# ============================================================
+- name: Pre-flight — verify EXL3 image, weights, ports on all 3 nodes
+  hosts: fire_nodes
+  gather_facts: no
+
+  vars:
+    exl3_image: "glm53-exl3:e3-v151"
+    hub_dir: "/home/spark/.cache/huggingface/hub"
+    model_cache: "models--Mia-AiLab--GLM-5.3-Flash-EXL3-TR3-4bpw"
+    dflash_cache: "models--incoai--GLM-5.3-Flash-DFlash2"
+    expected_shards: 120
+    api_port: 8888
+
+  tasks:
+    - name: Verify EXL3 serving image present
+      ansible.builtin.shell: |
+        docker image inspect {{ exl3_image }} >/dev/null 2>&1 && echo "image OK" || echo "image MISSING — just build-glm-exl3"
+      register: img
+      changed_when: false
+
+    - name: Assert image boot-gate file present (sparse-attn indexer) — fail fast, not garbage
+      ansible.builtin.shell: |
+        docker run --rm --entrypoint python3 {{ exl3_image }} -c "import os; print('bootgate=' + str(os.path.exists('/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/sparse_attn_indexer_kpool.py')))" 2>/dev/null
+      register: bootgate
+      changed_when: false
+      failed_when: "'bootgate=True' not in (bootgate.stdout | default(''))"
+
+    - name: Verify model snapshot + completeness (EXL3 target, else fallback cache)
+      ansible.builtin.shell: |
+        N=$(find {{ hub_dir }}/{{ model_cache }}/snapshots -name '*.safetensors' 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$N" -ge {{ expected_shards }} ]; then echo "model OK ($N shards)"; else
+          NB=$(find {{ hub_dir }}/models--brandonmusic--GLM-5.3-Flash-tr3-4bpw/snapshots -name '*.safetensors' 2>/dev/null | wc -l | tr -d ' ')
+          echo "target INCOMPLETE ($N shards); fallback brandonmusic=$NB — run just download-glm-exl3"
+        fi
+      register: model
+      changed_when: false
+
+    - name: Verify DFlash2 draft present
+      ansible.builtin.shell: |
+        find {{ hub_dir }}/{{ dflash_cache }}/snapshots -name 'model.safetensors' 2>/dev/null | wc -l | tr -d ' '
+      register: dflash
+      changed_when: false
+
+    - name: Warn if API port busy
+      ansible.builtin.shell: |
+        ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE ':{{ api_port }}$' && echo "{{ api_port }} busy" || echo "{{ api_port }} free"
+      register: port8888
+      changed_when: false
+
+    - name: Check QSFP fabric links state (IB ports ACTIVE per FABRIC config)
+      ansible.builtin.shell: |
+        for hca in {{ fabric_hcas | join(' ') }}; do
+          st=$(cat /sys/class/infiniband/$hca/ports/1/state 2>/dev/null || echo MISSING)
+          echo "$hca: $st"
+        done
+      register: fabric
+      changed_when: false
+
+    - name: Display pre-flight status
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} (rank {{ node_rank }}): {{ img.stdout }} | {{ model.stdout }} | DFlash2={{ dflash.stdout }} | port {{ api_port }}: {{ port8888.stdout }} | fabric {{ fabric.stdout | replace('\n', ', ') }}"
+
+# ============================================================
+# PLAY 2: Stop stale fire containers + ensure image on all 3 nodes
+# ============================================================
+- name: Stop stale fire containers, then ensure the EXL3 image on all 3 nodes
+  hosts: fire_nodes
+  gather_facts: no
+
+  vars:
+    exl3_image: "glm53-exl3:e3-v151"
+    api_port: 8888
+    master_port: 29521
+
+  tasks:
+    - name: Determine this host's container name
+      ansible.builtin.set_fact:
+        fire_container: "{{ 'fire-glm-head' if node_rank == 0 else 'fire-glm-w' ~ node_rank }}"
+
+    - name: Remove previous fire container
+      ansible.builtin.shell: docker rm -f {{ fire_container }} 2>/dev/null || true
+      changed_when: false
+
+    - name: Wait for API/master ports to free
+      ansible.builtin.wait_for:
+        port: "{{ item }}"
+        state: stopped
+        timeout: 20
+      failed_when: false
+      loop:
+        - "{{ api_port }}"
+        - "{{ master_port }}"
+
+    - name: Pull EXL3 image if not present
+      ansible.builtin.shell: |
+        if docker image inspect {{ exl3_image }} >/dev/null 2>&1; then
+          echo "image already present"
+        else
+          docker pull {{ exl3_image }} && echo "image pulled" || { echo "image pull FAILED — run just build-glm-exl3 (local overlay build)"; exit 1; }
+        fi
+      register: pull
+      changed_when: "'already present' not in (pull.stdout | default(''))"
+      retries: 2
+      delay: 5
+      timeout: 1800
+
+    - name: Display image state
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} ({{ fire_container }}): {{ pull.stdout }}"
+
+# ============================================================
+# PLAY 3: Stage launch scripts + runtime hooks, start containers (all 3)
+# ============================================================
+- name: Stage EXL3 launch scripts + runtime hooks, start containers on all 3 nodes
+  hosts: fire_nodes
+  gather_facts: no
+
+  vars:
+    exl3_image: "glm53-exl3:e3-v151"
+    hub: "/home/spark/.cache/huggingface"
+    overlay_dir: "{{ playbook_dir }}/../glm/exl3/overlay"
+
+  tasks:
+    - name: Determine this host's container name + role
+      ansible.builtin.set_fact:
+        fire_container: "{{ 'fire-glm-head' if node_rank == 0 else 'fire-glm-w' ~ node_rank }}"
+        fire_role: "{{ 'head' if node_rank == 0 else 'worker' }}"
+
+    - name: Stage launch script on host
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../glm/scripts/launch-glm-exl3-{{ fire_role }}.sh"
+        dest: "/tmp/launch-glm-exl3-{{ fire_role }}.sh"
+        mode: "0755"
+
+    - name: Create EXL3 runtime patch layer dir on host
+      ansible.builtin.raw: mkdir -p /tmp/glm-exl3-layer
+      changed_when: false
+
+    - name: Stage EXL3 runtime patch layer on host (controller -> remote /tmp)
+      ansible.builtin.copy:
+        src: "{{ overlay_dir }}/{{ item }}"
+        dest: "/tmp/glm-exl3-layer/{{ item | basename }}"
+        mode: "0644"
+      loop:
+        - "patch_glm_video_placeholders.py"
+        - "patch_suppress_stops_in_reasoning.py"
+        - "patch_scheduler_decode_floor.py"
+        - "patch_glm5_drafter_group.py"
+        - "patch_hybrid_prefix_hit.py"
+        - "patch_xgrammar_termination.py"
+        - "patch_kpool_tail_slotmap.py"
+        - "patch_router_gemm_gb10.py"
+        - "patch_cache_reset.py"
+        - "patch_fine_grained_apc.py"
+        - "patch_apc_per_group_retention.py"
+        - "patch_reasoning_noopener.py"
+        - "patch_apc_no_store.py"
+        - "patch_kv_capacity_log.py"
+        - "patch_w28_correctness.py"
+        - "patch_mamba_null_gap_retirement.py"
+        - "patch_adaptive_k.py"
+        - "patch_dense_fp8.py"
+        - "patch_default_max_new_tokens.py"
+        - "../files/chat_template.jinja"
+
+    - name: Ensure host log dir exists (survives container recreation)
+      ansible.builtin.command: mkdir -p /var/log/glm-exl3
+      changed_when: false
+
+    - name: Build per-node fabric env strings
+      ansible.builtin.set_fact:
+        fabric_ips_s: "{{ fabric_ips | join(',') }}"
+        fabric_ifs_s: "{{ fabric_ifs | join(',') }}"
+        fabric_hcas_s: "{{ fabric_hcas | join(',') }}"
+
+    - name: Start container (docker run sleep infinity for script exec)
+      ansible.builtin.shell: |
+        docker run -d \
+          --name {{ fire_container }} \
+          --gpus all \
+          --network host \
+          --ipc host \
+          --shm-size 32g \
+          --stop-timeout 60 \
+          --device /dev/infiniband \
+          --cap-add IPC_LOCK \
+          --ulimit memlock=-1 \
+          --ulimit stack=67108864 \
+          -e NCCL_IB_DISABLE=0 \
+          -e NCCL_IB_ROCE_VERSION_NUM=2 \
+          -e NCCL_NET=IB \
+          -e NCCL_NET_PLUGIN=none \
+          -e NCCL_NVLS_ENABLE=0 \
+          -e NCCL_CUMEM_ENABLE=0 \
+          -e NCCL_IB_MERGE_NICS=0 \
+          -e NCCL_CROSS_NIC=0 \
+          -e NCCL_IGNORE_CPU_AFFINITY=1 \
+          -e NCCL_DEBUG=WARN \
+          -e HF_HUB_OFFLINE=1 \
+          -e TRANSFORMERS_OFFLINE=1 \
+          -e HF_HOME=/root/.cache/huggingface \
+          -e VLLM_CACHE_ROOT=/root/.cache/vllm \
+          -e TORCH_CUDA_ARCH_LIST=12.1a \
+          -e FLASHINFER_CUDA_ARCH_LIST=12.1a \
+          -e FLASHINFER_DISABLE_VERSION_CHECK=1 \
+          -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+          -e VLLM_NO_USAGE_STATS=1 \
+          -e DO_NOT_TRACK=1 \
+          -e GLM53_FINE_GRAINED_APC=1 \
+          -e VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA=0 \
+          -e GLM53_APC_NO_STORE=1 \
+          -e GLM53_KV_CAPACITY_LOG=1 \
+          -e GLM53_MIXED_PREFILL_CHUNK=fair \
+          -e GLM53_FAIR_PREFILL_CHUNK=256 \
+          -e GLM53_FAIR_PREFILL_SHARE=0.30 \
+          -e GLM53_FAIR_PREFILL_MAX_INTERVAL_MS=2000 \
+          -e GLM53_FAIR_PREFILL_MAX_STEP_MS=2000 \
+          -e GLM53_FAIR_PREFILL_MAX_CHUNKS=1 \
+          -e EXL3_FAT_GROUPED=1 \
+          -e EXL3_TEMP_ROWS_FUSED=32 \
+          -v "{{ hub }}:/root/.cache/huggingface" \
+          -v /var/log/glm-exl3:/glm-logs \
+          --entrypoint /bin/bash \
+          {{ exl3_image }} -c 'sleep infinity'
+      changed_when: false
+
+    - name: Copy launch script + runtime hooks into container
+      ansible.builtin.shell: |
+        docker cp /tmp/launch-glm-exl3-{{ fire_role }}.sh {{ fire_container }}:/tmp/launch.sh
+        docker exec {{ fire_container }} chmod +x /tmp/launch.sh
+        docker exec {{ fire_container }} mkdir -p /opt/glm53
+        for p in patch_glm_video_placeholders.py patch_suppress_stops_in_reasoning.py \
+                 patch_scheduler_decode_floor.py patch_glm5_drafter_group.py \
+                 patch_hybrid_prefix_hit.py patch_xgrammar_termination.py \
+                 patch_kpool_tail_slotmap.py patch_router_gemm_gb10.py patch_cache_reset.py \
+                 patch_fine_grained_apc.py patch_apc_per_group_retention.py \
+                 patch_reasoning_noopener.py \
+                 patch_apc_no_store.py patch_kv_capacity_log.py \
+                 patch_adaptive_k.py patch_dense_fp8.py patch_default_max_new_tokens.py \
+                 patch_w28_correctness.py patch_mamba_null_gap_retirement.py; do
+          docker cp /tmp/glm-exl3-layer/$p {{ fire_container }}:/opt/glm53/$p
+        done
+      changed_when: false
+
+    - name: Copy chat template into container
+      ansible.builtin.shell: |
+        if [ -f /tmp/glm-exl3-layer/chat_template.jinja ]; then
+          docker cp /tmp/glm-exl3-layer/chat_template.jinja {{ fire_container }}:/opt/glm53/chat_template.jinja
+          echo "chat template staged"
+        else
+          echo "chat template missing from overlay (using checkpoint jinja)"
+        fi
+      changed_when: false
+
+    - name: Verify container is Up
+      ansible.builtin.shell: |
+        docker ps --filter name={{ fire_container }} --format '{{ "{{" }}.Status{{ "}}" }}' | head -1
+      register: container_status
+      changed_when: false
+      retries: 3
+      delay: 3
+      until: "'Up' in container_status.stdout"
+
+    - name: Display container status
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} ({{ fire_container }}): {{ container_status.stdout }}"
+
+# ============================================================
+# PLAY 4: Start workers (ranks 1 and 2) — mp-executor headless join
+# ============================================================
+- name: Start EXL3 workers (ranks 1-2, headless) on gx10-2ca4 + spark-3ff5
+  hosts: fire_workers
+  gather_facts: no
+  # NOTE: head lan_ip is consumed from hostvars below; ordering between the
+  # worker rank plays does not matter (both join the master when it starts).
+
+  vars:
+    hub_dir: "/home/spark/.cache/huggingface/hub"
+    dflash_cache: "models--incoai--GLM-5.3-Flash-DFlash2"
+    model_cache: "models--Mia-AiLab--GLM-5.3-Flash-EXL3-TR3-4bpw"
+    head_lan_ip: "{{ hostvars['spark-e116.local'].lan_ip }}"
+    master_port: 29521
+    api_port: 8888
+    served_model: "GLM-5.3-Flash-EXL3"
+    quantization: "exl3"
+    kv_cache_dtype: "fp8"
+    spec_method: "dflash"
+    # DFlash2 speculative depth is a workload knob, not a constant
+    # (tonyd2wild TP2-SPEC-DEPTH-AND-KV-2026-09-02): k=7 wins single-stream.
+    # Re-tune for TP=3 once the triangle is up (mean accepted length, not ratio).
+    dflash_tokens: 7
+    dflash_draft_tp: 1
+    dflash_revision: "7d74cdd881ed7e32c31175984a67823127b66cfe"
+    mtp_tokens: 2
+    max_model_len: 384000
+    gpu_mem_util: 0.87
+    max_num_seqs: 4
+    max_num_batched_tokens: 3584
+    enforce_eager: 0
+    language_model_only: 0
+    skip_mm_profiling: 1
+    limit_mm: '{"image":4,"video":1}'
+    mm_image_tokens: 2048
+    mm_processor_cache_gb: 1
+
+  tasks:
+    - name: Resolve DFlash2 snapshot dir (host path -> in-container path, pinned revision preferred)
+      ansible.builtin.shell: |
+        DC={{ hub_dir }}/{{ dflash_cache }}
+        REF={{ dflash_revision }}
+        if [ ! -d "$DC/snapshots/$REF" ]; then
+          REF=$(cat $DC/refs/main 2>/dev/null | head -1)
+          if [ -z "$REF" ] || [ ! -d "$DC/snapshots/$REF" ]; then
+            REF=$(ls -1t $DC/snapshots 2>/dev/null | head -1)
+          fi
+        fi
+        echo "/root/.cache/huggingface/hub/{{ dflash_cache }}/snapshots/$REF"
+      register: dflash_dir
+      changed_when: false
+      failed_when: dflash_dir.stdout.endswith('/snapshots/')
+
+    - name: Resolve model snapshot dir (target or fallback, host path -> in-container path)
+      ansible.builtin.shell:
+        cmd: >-
+          for BASE in {{ model_cache }} models--brandonmusic--GLM-5.3-Flash-tr3-4bpw; do
+          REF=$(cat "{{ hub_dir }}/$BASE/refs/main" 2>/dev/null | head -1);
+          if [ -z "$REF" ] || [ ! -d "{{ hub_dir }}/$BASE/snapshots/$REF" ]; then
+          REF=$(ls -1t "{{ hub_dir }}/$BASE/snapshots" 2>/dev/null | head -1); fi;
+          [ -n "$REF" ] && break; done;
+          echo "/root/.cache/huggingface/hub/$BASE/snapshots/$REF"
+      register: w_model_dir
+      changed_when: false
+      failed_when: w_model_dir.stdout.endswith('/snapshots/')
+
+    - name: Launch worker (headless rank {{ node_rank }}) via mp executor
+      ansible.builtin.shell: |
+        docker exec -d {{ 'fire-glm-w' ~ node_rank }} bash -c '
+          export NODE_RANK={{ node_rank }};
+          export SERVED_MODEL_NAME={{ served_model }};
+          export PORT={{ api_port }};
+          export TP=3; export NNODES=3;
+          export HEAD_LAN_IP={{ head_lan_ip }};
+          export MASTER_PORT={{ master_port }};
+          export QUANTIZATION={{ quantization }};
+          export MAX_MODEL_LEN={{ max_model_len }};
+          export GPU_MEM_UTIL={{ gpu_mem_util }};
+          export MAX_NUM_SEQS={{ max_num_seqs }};
+          export MAX_NUM_BATCHED_TOKENS={{ max_num_batched_tokens }};
+          export KV_CACHE_DTYPE={{ kv_cache_dtype }};
+          export SPEC_METHOD={{ spec_method }};
+          export DFLASH_TOKENS={{ dflash_tokens }};
+          export DFLASH_MODEL_DIR={{ dflash_dir.stdout }};
+          export DFLASH_DRAFT_TP={{ dflash_draft_tp }};
+          export MODEL_DIR={{ w_model_dir.stdout }};
+          export MTP_TOKENS={{ mtp_tokens }};
+          export LANGUAGE_MODEL_ONLY={{ language_model_only }};
+          export SKIP_MM_PROFILING={{ skip_mm_profiling }};
+          export LIMIT_MM="{{ limit_mm }}";
+          export MM_IMAGE_TOKENS={{ mm_image_tokens }};
+          export MM_PROCESSOR_CACHE_GB={{ mm_processor_cache_gb }};
+          export CHAT_TEMPLATE=/opt/glm53/chat_template.jinja;
+          export ENFORCE_EAGER={{ enforce_eager }};
+          export EXL3_FUSED_MOE=1;
+          export EXL3_FAT_SORTED=1;
+          export EXL3_FAT_BATCHED=1;
+          export EXL3_FAT_KERNEL=1;
+          export EXL3_FAT_GROUPED=1;
+          export EXL3_TEMP_ROWS_FUSED=32;
+          export GLM53_INDEXER_WORKSPACE=rightsize;
+          export EXTRA_ARGS="--no-async-scheduling";
+          export VLLM_ENGINE_READY_TIMEOUT_S=3600;
+          export FABRIC_MODE={{ fabric_mode | default("ib") }};
+          export FABRIC_IFS={{ fabric_ifs_s }};
+          export FABRIC_HCAS={{ fabric_hcas_s }};
+          export FABRIC_IPS={{ fabric_ips_s }};
+          mkdir -p /var/log/glm;
+          nohup bash /tmp/launch.sh > /glm-logs/fire-glm-w{{ node_rank }}.log 2>&1 &
+          ln -sf /glm-logs/fire-glm-w{{ node_rank }}.log /tmp/fire-glm-w{{ node_rank }}.log
+          echo "worker rank {{ node_rank }} launching (log /glm-logs/fire-glm-w{{ node_rank }}.log)"
+        '
+      register: w_launch
+
+    - name: Display worker launch status
+      ansible.builtin.debug:
+        msg: "Worker {{ inventory_hostname }}: rank {{ node_rank }} headless joining TP3 at {{ head_lan_ip }}:{{ master_port }} — MODEL_DIR={{ w_model_dir.stdout }} DFLASH={{ dflash_dir.stdout }}"
+
+# ============================================================
+# PLAY 5: Start head (rank 0) — mp-executor master + OpenAI API :8888
+# ============================================================
+- name: Launch EXL3 head (rank 0, API :8888) on spark-e116.local
+  hosts: spark-e116.local
+  gather_facts: no
+
+  vars:
+    hub_dir: "/home/spark/.cache/huggingface/hub"
+    dflash_cache: "models--incoai--GLM-5.3-Flash-DFlash2"
+    model_cache: "models--Mia-AiLab--GLM-5.3-Flash-EXL3-TR3-4bpw"
+    master_port: 29521
+    api_port: 8888
+    served_model: "GLM-5.3-Flash-EXL3"
+    quantization: "exl3"
+    kv_cache_dtype: "fp8"
+    spec_method: "dflash"
+    dflash_tokens: 7
+    dflash_draft_tp: 1
+    dflash_revision: "7d74cdd881ed7e32c31175984a67823127b66cfe"
+    mtp_tokens: 2
+    max_model_len: 384000
+    gpu_mem_util: 0.87
+    max_num_seqs: 4
+    max_num_batched_tokens: 3584
+    enforce_eager: 0
+    language_model_only: 0
+    skip_mm_profiling: 1
+    limit_mm: '{"image":4,"video":1}'
+    mm_image_tokens: 2048
+    mm_processor_cache_gb: 1
+
+  tasks:
+    - name: Resolve model snapshot dir on head (in-container path)
+      ansible.builtin.shell:
+        cmd: >-
+          for BASE in {{ model_cache }} models--brandonmusic--GLM-5.3-Flash-tr3-4bpw; do
+          REF=$(cat "{{ hub_dir }}/$BASE/refs/main" 2>/dev/null | head -1);
+          if [ -z "$REF" ] || [ ! -d "{{ hub_dir }}/$BASE/snapshots/$REF" ]; then
+          REF=$(ls -1t "{{ hub_dir }}/$BASE/snapshots" 2>/dev/null | head -1); fi;
+          [ -n "$REF" ] && break; done;
+          echo "/root/.cache/huggingface/hub/$BASE/snapshots/$REF"
+      register: h_model_dir
+      changed_when: false
+      failed_when: h_model_dir.stdout.endswith('/snapshots/')
+
+    - name: Resolve DFlash2 snapshot dir on head (in-container path, pinned revision preferred)
+      ansible.builtin.shell: |
+        DC={{ hub_dir }}/{{ dflash_cache }}
+        REF={{ dflash_revision }}
+        if [ ! -d "$DC/snapshots/$REF" ]; then
+          REF=$(cat $DC/refs/main 2>/dev/null | head -1)
+          if [ -z "$REF" ] || [ ! -d "$DC/snapshots/$REF" ]; then
+            REF=$(ls -1t $DC/snapshots 2>/dev/null | head -1)
+          fi
+        fi
+        echo "/root/.cache/huggingface/hub/{{ dflash_cache }}/snapshots/$REF"
+      register: h_dflash_dir
+      changed_when: false
+      failed_when: h_dflash_dir.stdout.endswith('/snapshots/')
+
+    - name: Launch head (rank 0, API) via mp executor
+      ansible.builtin.shell: |
+        docker exec -d fire-glm-head bash -c '
+          export NODE_RANK=0;
+          export SERVED_MODEL_NAME={{ served_model }};
+          export PORT={{ api_port }};
+          export TP=3; export NNODES=3;
+          export HEAD_LAN_IP={{ lan_ip }};
+          export MASTER_PORT={{ master_port }};
+          export QUANTIZATION={{ quantization }};
+          export MAX_MODEL_LEN={{ max_model_len }};
+          export GPU_MEM_UTIL={{ gpu_mem_util }};
+          export MAX_NUM_SEQS={{ max_num_seqs }};
+          export MAX_NUM_BATCHED_TOKENS={{ max_num_batched_tokens }};
+          export KV_CACHE_DTYPE={{ kv_cache_dtype }};
+          export SPEC_METHOD={{ spec_method }};
+          export DFLASH_TOKENS={{ dflash_tokens }};
+          export DFLASH_MODEL_DIR={{ h_dflash_dir.stdout }};
+          export DFLASH_DRAFT_TP={{ dflash_draft_tp }};
+          export MODEL_DIR={{ h_model_dir.stdout }};
+          export MTP_TOKENS={{ mtp_tokens }};
+          export LANGUAGE_MODEL_ONLY={{ language_model_only }};
+          export SKIP_MM_PROFILING={{ skip_mm_profiling }};
+          export LIMIT_MM="{{ limit_mm }}";
+          export MM_IMAGE_TOKENS={{ mm_image_tokens }};
+          export MM_PROCESSOR_CACHE_GB={{ mm_processor_cache_gb }};
+          export CHAT_TEMPLATE=/opt/glm53/chat_template.jinja;
+          export ENFORCE_EAGER={{ enforce_eager }};
+          export EXL3_FUSED_MOE=1;
+          export EXL3_FAT_SORTED=1;
+          export EXL3_FAT_BATCHED=1;
+          export EXL3_FAT_KERNEL=1;
+          export EXL3_FAT_GROUPED=1;
+          export EXL3_TEMP_ROWS_FUSED=32;
+          export GLM53_INDEXER_WORKSPACE=rightsize;
+          export EXTRA_ARGS="--no-async-scheduling";
+          export VLLM_ENGINE_READY_TIMEOUT_S=3600;
+          export FABRIC_MODE={{ fabric_mode | default("ib") }};
+          export FABRIC_IFS={{ fabric_ifs | join(",") }};
+          export FABRIC_HCAS={{ fabric_hcas | join(",") }};
+          export FABRIC_IPS={{ fabric_ips | join(",") }};
+          mkdir -p /var/log/glm;
+          nohup bash /tmp/launch.sh > /glm-logs/fire-glm-head.log 2>&1 &
+          ln -sf /glm-logs/fire-glm-head.log /tmp/fire-glm-head.log
+          echo "head launching (log /glm-logs/fire-glm-head.log, symlinked at /tmp/fire-glm-head.log)"
+        '
+      register: h_launch
+
+    - name: Display head launch status
+      ansible.builtin.debug:
+        msg: "Head (spark-e116): rank0 master + API :{{ api_port }} — MODEL_DIR={{ h_model_dir.stdout }} DFLASH={{ h_dflash_dir.stdout }}"
+
+# ============================================================
+# PLAY 6: Wait for vLLM API health on spark-e116.local:8888
+# ============================================================
+- name: Wait for EXL3 API health on spark-e116.local:8888
+  hosts: spark-e116.local
+  gather_facts: no
+
+  vars:
+    api_port: 8888
+
+  tasks:
+    - name: Poll /health with streaming head log + process-level failure detection
+      ansible.builtin.shell: |
+        set +e
+        PORT={{ api_port }}
+        TIMEOUT=3600
+        INTERVAL=15
+        START=$SECONDS
+        CONTAINER='fire-glm-head'
+        LOGFILE=/tmp/fire-glm-head.log
+        SENT=0
+
+        ( while true; do
+            if [ -f "$LOGFILE" ]; then
+              CUR=$(wc -c < "$LOGFILE")
+              if [ "$CUR" -gt "$SENT" ]; then
+                tail -c +$((SENT + 1)) "$LOGFILE"
+                SENT=$CUR
+              fi
+            fi
+            sleep 2
+          done ) &
+        LOG_PID=$!
+        trap 'kill $LOG_PID 2>/dev/null; wait $LOG_PID 2>/dev/null' EXIT INT TERM
+
+        while true; do
+          HTTP=$(curl -sf -o /dev/null -w '%{http_code}' --max-time 5 \
+                "http://127.0.0.1:${PORT}/health" 2>/dev/null || echo "000")
+
+          if [ "$HTTP" = "200" ]; then
+            echo ""
+            echo ">>> [OK] FIRE EXL3 API health=200 after $((SECONDS - START))s"
+            exit 0
+          fi
+
+          ELAPSED=$((SECONDS - START))
+
+          STATE=$(docker inspect --format '{{ "{{" }}.State.Status{{ "}}" }}' "$CONTAINER" 2>/dev/null || echo "missing")
+          if [ "$STATE" = "exited" ] || [ "$STATE" = "dead" ]; then
+            echo ""
+            echo ">>> [FAIL] head container ${STATE} after ${ELAPSED}s"
+            echo ">>> Last 60 head log lines:"
+            tail -60 "$LOGFILE" 2>/dev/null || docker logs "$CONTAINER" 2>&1 | tail -60
+            exit 1
+          fi
+
+          VLLM_ALIVE=$(docker exec "$CONTAINER" bash -c 'pgrep -f "vllm serve" >/dev/null && echo yes || echo no' 2>/dev/null)
+          if [ "$VLLM_ALIVE" = "no" ]; then
+            echo ""
+            echo ">>> [FAIL] vllm serve process exited after ${ELAPSED}s (container still Up)"
+            echo ">>> Last 60 head log lines:"
+            tail -60 "$LOGFILE" 2>/dev/null || docker logs "$CONTAINER" 2>&1 | tail -60
+            exit 1
+          fi
+
+          if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
+            echo ""
+            echo ">>> [FAIL] timed out after ${TIMEOUT}s (last: health=${HTTP}, state=${STATE}, vllm=${VLLM_ALIVE})"
+            exit 1
+          fi
+
+          echo ">>> [${ELAPSED}s] health=${HTTP} state=${STATE} vllm_proc=${VLLM_ALIVE} — waiting ${INTERVAL}s..."
+          sleep "$INTERVAL"
+        done
+      register: exl3_wait
+      changed_when: false
+      async: 3660
+      poll: 20
+
+    - name: Print success banner
+      ansible.builtin.debug:
+        msg: |
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          ✓ FIRE GLM-5.3-Flash-EXL3 is READY on spark-e116.local:{{ api_port }}
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          Model:      Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw (EXL3/TR3 4bpw, ~164 GiB)
+          Engine:     vLLM (glm53-flash-arm64-cu130 overlay) + mp executor TP3, 3 nodes
+          Triangle:   spark-e116 (r0, head) + gx10-2ca4 (r1) + spark-3ff5 (r2)
+          Quant:      exl3 fused MoE (trellis+suh+svh+mcg) — NOT marlin/NVFP4
+          KV cache:   fp8 (packed fp8_ds_mla), block-size 64
+          Speculate:  DFlash2 k=7 (incoai/GLM-5.3-Flash-DFlash2)
+          Context:    384000 (padded slot-share pool; page-aligned MNBT)
+          Concurrent: --max-num-seqs 4 (batched 3584)
+          MM:         vision on (limit {image:4,video:1}), --skip-mm-profiling
+          API:        http://spark-e116.local:{{ api_port }}/v1  (LAN)
+          API (tailnet): https://spark-e116.taile54e9f.ts.net/v1  (HTTPS, tailnet-only)
+          Model on wire: GLM-5.3-Flash-EXL3
+          Tools:      --tool-call-parser glm47 --enable-auto-tool-choice
+          Reasoning:  --reasoning-parser deepseek_r1 (glm45 discards bare-request answers)
+          Thinking off per-request: {"chat_template_kwargs":{"enable_thinking":false}}
+          Fabric:     QSFP triangle RoCEv2 (10.10.0/1/2.x) — FABRIC_MODE={{ fabric_mode | default("ib") }}
+          Containers: fire-glm-head / fire-glm-w1 / fire-glm-w2
+          Logs:       just log head | just log w1 | just log w2
+          Stop:       just stop-glm-exl3
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# ============================================================
+# PLAY 7: Smoke test
+# ============================================================
+- name: Smoke test — send a short chat completion
+  hosts: spark-e116.local
+  gather_facts: no
+
+  vars:
+    api_port: 8888
+    served_model: "GLM-5.3-Flash-EXL3"
+
+  tasks:
+    - name: POST a short chat completion
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ api_port }}/v1/chat/completions"
+        method: POST
+        body_format: json
+        body:
+          model: "{{ served_model }}"
+          messages:
+            - role: user
+              content: "Reply exactly: OK FIRE GLM 5.3 EXL3 LIVE TP3"
+          max_tokens: 60
+          temperature: 0
+          chat_template_kwargs:
+            enable_thinking: false
+        status_code: 200
+        timeout: 180
+      register: smoke_test
+
+    - name: Display inference response
+      ansible.builtin.debug:
+        msg: "{{ smoke_test.json.choices[0].message.content }}"
+
+    - name: POST bare chat completion (no chat_template_kwargs — catches reasoning-parser discard)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ api_port }}/v1/chat/completions"
+        method: POST
+        body_format: json
+        body:
+          model: "{{ served_model }}"
+          messages:
+            - role: user
+              content: "Reply exactly: OK FIRE GLM 5.3 EXL3 BARE OK"
+          max_tokens: 60
+          temperature: 0
+        status_code: 200
+        timeout: 180
+      register: smoke_bare
+
+    - name: Display bare response
+      ansible.builtin.debug:
+        msg: "{{ smoke_bare.json.choices[0].message.content }}"
+      failed_when: >-
+        not (smoke_bare.json.choices[0].message.content | default('') | trim | length > 0)
+
+    - name: Configure tailscale serve (HTTPS on tailnet, additive to LAN HTTP)
+      become: true
+      block:
+        - name: Check tailscale installed
+          ansible.builtin.command: which tailscale
+          register: ts_bin
+          changed_when: false
+          failed_when: false
+
+        - name: Enable tailscale serve https -> :{{ api_port }}
+          ansible.builtin.command: >-
+            tailscale serve --bg --https=443 http://localhost:{{ api_port }}
+          when: ts_bin.rc == 0
+          register: ts_serve
+          changed_when: "'already' not in (ts_serve.stdout | default('') | lower)"
+
+        - name: Verify tailnet HTTPS endpoint
+          ansible.builtin.uri:
+            url: "https://{{ inventory_hostname | replace('.local','') }}.taile54e9f.ts.net/v1/models"
+            return_content: no
+            status_code: 200
+            timeout: 30
+          when: ts_bin.rc == 0
+          register: ts_check
+          changed_when: false
+          failed_when: false
+
+        - name: Report tailnet serve status
+          ansible.builtin.debug:
+            msg: >-
+              {{ 'Tailnet HTTPS: https://' ~ (inventory_hostname | replace('.local','')) ~ '.taile54e9f.ts.net/v1 (status ' ~ (ts_check.status | default('pending-cert-approval')) ~ ')'
+                 if ts_bin.rc == 0 else 'tailscale not installed on ' ~ inventory_hostname ~ ' - serve skipped' }}

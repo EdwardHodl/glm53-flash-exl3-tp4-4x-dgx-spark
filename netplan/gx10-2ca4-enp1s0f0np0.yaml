@@ -1,0 +1,21 @@
+# gx10-2ca4.local — fire triangle fabric (VERIFIED wiring 2026-09-21)
+# link2 -> spark-e116 : enp1s0f0np0 = 10.10.0.2/24
+# link3 -> spark-3ff5 : enp1s0f1np1 = 10.10.2.2/24
+# Deployed to /etc/netplan/50-qfsp-static.yaml (root:root 600). Apply: sudo netplan apply
+# NOTE: the pre-existing 10.10.0.2/24 lived on enp1s0f1np1 (old f1<->f1 link) — it
+# has been MOVED to enp1s0f0np0, which is where the e116 cable now lands.
+network:
+  version: 2
+  ethernets:
+    enp1s0f0np0:
+      addresses:
+        - 10.10.0.2/24
+      nameservers:
+        addresses: []
+      optional: true
+    enp1s0f1np1:
+      addresses:
+        - 10.10.2.2/24
+      nameservers:
+        addresses: []
+      optional: true

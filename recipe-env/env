@@ -1,0 +1,52 @@
+# fire triangle — base .env for upstream start-tp3.sh (GLM-5.3-Flash-EXL3, 3 ranks)
+# Deployed on spark-e116.local as /home/spark/glm53-tp3/.env
+# Head pins are overridden in .env.tp3 (TP=3 / WORKER2 / ring fabric).
+
+HEAD_IP=192.168.1.6
+WORKER_IP=192.168.1.31
+WORKER_USER=spark
+WORKER_HOME=/home/spark
+
+MODEL=Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw
+MODEL_FALLBACK=brandonmusic/GLM-5.3-Flash-tr3-4bpw
+MODEL_REVISION=25a44fdbf16862a46b7cc9921142c6c81350af2f
+
+# Weights are staged locally on all three ranks (fire kit rsync over QSFP), so
+# no NFS export is needed.
+NFS_SHARE=0
+
+# Local image on all 3 nodes; built from the vendored e3 overlay.
+# vLLM 0.1.dev20051+g487ecf187 — exactly the version the TP3 overlays require.
+IMAGE=glm53-exl3:e3-v151
+
+PORT=8888
+TP=2
+NNODES=2
+MASTER_PORT=29521
+QUANTIZATION=exl3
+ENFORCE_EAGER=0
+EXL3_FUSED_MOE=1
+EXL3_FAT_KERNEL=1
+EXL3_FAT_GROUPED=1
+SERVED_MODEL_NAME=GLM-5.3-Flash-EXL3
+
+SPEC_METHOD=dflash
+DFLASH_MODEL=incoai/GLM-5.3-Flash-DFlash2
+DFLASH_REVISION=7d74cdd881ed7e32c31175984a67823127b66cfe
+DFLASH_TOKENS=7
+DFLASH_DRAFT_TP=2
+MTP_TOKENS=2
+
+MAX_MODEL_LEN=400000
+MAX_NUM_SEQS=4
+MAX_NUM_BATCHED_TOKENS=7168
+LONG_PREFILL_TOKEN_THRESHOLD=
+GPU_MEM_UTIL=0.85
+KV_CACHE_DTYPE=fp8
+LANGUAGE_MODEL_ONLY=0
+SKIP_MM_PROFILING=1
+LIMIT_MM='{"image":4,"video":1}'
+MM_IMAGE_TOKENS=2048
+VIDEO_NUM_FRAMES=
+MM_PROCESSOR_CACHE_GB=1
+ABLIT=0

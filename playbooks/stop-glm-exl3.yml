@@ -1,0 +1,49 @@
+---
+# stop-glm-exl3.yml — Tear down the FIRE GLM-5.3-Flash-EXL3 TP=3 triangle
+#
+# Removes fire-glm-head (spark-e116), fire-glm-w1 (gx10-2ca4), fire-glm-w2
+# (spark-3ff5). The mp executor uses no Ray, so only the three containers need
+# cleanup. Weights and compile caches are left intact for a fast restart.
+#
+# NOTE: this does NOT touch the old sparks TP=2 stack (glm53-exl3-head/worker).
+#
+# Usage:
+#   ansible-playbook -i playbooks/inventory.yml playbooks/stop-glm-exl3.yml
+#   just stop-glm-exl3
+# ============================================================
+- name: Stop FIRE GLM-5.3-Flash-EXL3 containers on all 3 nodes
+  hosts: fire_nodes
+  gather_facts: no
+
+  vars:
+    api_port: 8888
+    master_port: 29521
+
+  tasks:
+    - name: Determine this host's container name
+      ansible.builtin.set_fact:
+        fire_container: "{{ 'fire-glm-head' if node_rank == 0 else 'fire-glm-w' ~ node_rank }}"
+
+    - name: Remove FIRE container
+      ansible.builtin.shell: docker rm -f {{ fire_container }} 2>/dev/null || echo "no container"
+      changed_when: false
+
+    - name: Wait for API/master ports to free
+      ansible.builtin.wait_for:
+        port: "{{ item }}"
+        state: stopped
+        timeout: 20
+      failed_when: false
+      loop:
+        - "{{ api_port }}"
+        - "{{ master_port }}"
+
+    - name: Confirm container gone
+      ansible.builtin.shell: |
+        docker inspect {{ fire_container }} >/dev/null 2>&1 && echo "STILL PRESENT" || echo "gone"
+      register: gone
+      changed_when: false
+
+    - name: Display stop status
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ fire_container }} {{ gone.stdout }} (weights kept)"

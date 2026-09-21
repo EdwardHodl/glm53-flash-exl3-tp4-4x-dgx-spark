@@ -1,0 +1,107 @@
+---
+# build-glm-exl3.yml — Fetch the GLM-5.3-Flash EXL3 serving image on ALL 3 nodes
+#
+# FIRE kit: the image must exist on every node (each rank runs its own vllm
+# serve process). Default path pulls the public GHCR image and retags it to
+# glm53-exl3:e3-v151 (the tag the start playbook expects). Local build from the
+# vendored fire/glm/exl3/Dockerfile is supported on the head with
+# build_exl3_image=true (~20-40 min on GB10); the built image is then shipped
+# to both workers via docker save | ssh docker load.
+#
+# Usage:
+#   ansible-playbook -i playbooks/inventory.yml playbooks/build-glm-exl3.yml
+#   just build-glm-exl3                          # GHCR pull on all 3
+#   just build-glm-exl3-rebuild                  # local build + ship
+# ============================================================
+- name: Fetch or build the EXL3 image on the head
+  hosts: spark-e116.local
+  gather_facts: no
+
+  vars:
+    exl3_pull_image: "ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks:exl3"
+    exl3_image: "glm53-exl3:e3-v151"
+    build_exl3_image: false
+    exl3_build_dir: "{{ playbook_dir }}/../glm/exl3"
+    worker_lan_ips:
+      - "192.168.1.31"
+      - "192.168.1.28"
+
+  tasks:
+    - name: LOCAL BUILD — docker build from vendored Dockerfile
+      ansible.builtin.shell: |
+        docker build -t {{ exl3_image }} {{ exl3_build_dir }}
+      register: build
+      changed_when: true
+      timeout: 3600
+      when: build_exl3_image
+
+    - name: GHCR pull (default path) + retag
+      ansible.builtin.shell: |
+        if docker image inspect {{ exl3_image }} >/dev/null 2>&1; then
+          echo "image already present"
+        else
+          docker pull {{ exl3_pull_image }} \
+            && docker tag {{ exl3_pull_image }} {{ exl3_image }} \
+            && echo "image pulled + retagged" \
+            || { echo "GHCR pull FAILED — rerun with -e build_exl3_image=true for a local build"; exit 1; }
+        fi
+      register: fetch
+      changed_when: "'already present' not in (fetch.stdout | default(''))"
+      retries: 2
+      delay: 5
+      timeout: 1800
+      when: not build_exl3_image
+
+    - name: Ship image to workers (docker save over LAN — only after local build)
+      ansible.builtin.shell: |
+        set -e
+        for WIP in {{ worker_lan_ips | join(' ') }}; do
+          SSH="ssh -o StrictHostKeyChecking=no"
+          if [ "$WIP" = "192.168.1.28" ]; then
+            SSH="ssh -i /home/flowai/.ssh/spark_agent_key -o StrictHostKeyChecking=no"
+          fi
+          echo "shipping {{ exl3_image }} -> ${WIP} (a few minutes)..."
+          docker save {{ exl3_image }} | $SSH spark@${WIP} 'docker load'
+        done
+      register: ship
+      changed_when: true
+      timeout: 3600
+      when: build_exl3_image
+
+    - name: Display head image state
+      ansible.builtin.debug:
+        msg: "head: {{ exl3_image }} ready (build_exl3_image={{ build_exl3_image }})"
+
+# ============================================================
+# PLAY 2: Ensure image present on both workers (GHCR pull path)
+# ============================================================
+- name: Ensure EXL3 image on workers (GHCR pull when not locally built)
+  hosts: fire_workers
+  gather_facts: no
+
+  vars:
+    exl3_pull_image: "ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks:exl3"
+    exl3_image: "glm53-exl3:e3-v151"
+    build_exl3_image: false
+
+  tasks:
+    - name: GHCR pull + retag on worker (skipped if the head already shipped the image)
+      ansible.builtin.shell: |
+        if docker image inspect {{ exl3_image }} >/dev/null 2>&1; then
+          echo "image already present"
+        else
+          docker pull {{ exl3_pull_image }} \
+            && docker tag {{ exl3_pull_image }} {{ exl3_image }} \
+            && echo "image pulled + retagged" \
+            || { echo "GHCR pull FAILED on {{ inventory_hostname }} — run the head with build_exl3_image=true to ship it"; exit 1; }
+        fi
+      register: wfetch
+      changed_when: "'already present' not in (wfetch.stdout | default(''))"
+      retries: 2
+      delay: 5
+      timeout: 1800
+      when: not build_exl3_image
+
+    - name: Display worker image state
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} (rank {{ node_rank }}): {{ wfetch.stdout | default('shipped from head (local build path)') }}"

@@ -1,0 +1,200 @@
+---
+# download-glm-exl3.yml — Download Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw + DFlash2
+# on the head, then rsync to BOTH workers for the FIRE TP=3 triangle.
+#
+# Every rank loads weights from its local HF cache, so all 3 nodes need the
+# full ~164 GiB EXL3 pack + the ~2.3 GiB DFlash2 draft.
+#
+# Head download is resumable and a no-op when complete. Rsync to workers runs
+# over the LAN (192.168.1.x); point-to-point QSFP links carry no SSH today, so
+# the transfer does not use the fabric. ~164 GiB at 1 GbE ≈ 22 min per worker
+# (parallel); at 2.5 GbE ≈ 9 min.
+#
+# Usage:
+#   ansible-playbook -i playbooks/inventory.yml playbooks/download-glm-exl3.yml
+#   just download-glm-exl3
+# ============================================================
+# PLAY 1: Disk-space guard on all 3 nodes
+# ============================================================
+- name: Pre-flight — verify enough free space on all 3 nodes
+  hosts: fire_nodes
+  gather_facts: no
+
+  tasks:
+    - name: Check free space on the HF cache filesystem
+      ansible.builtin.shell: |
+        df -BG --output=avail /home/spark/.cache/huggingface | tail -1 | tr -d ' G'
+      register: free_gb
+      changed_when: false
+      failed_when: false
+
+    - name: Display disk status (model is ~164 GiB per node, all 3 ranks read local weights)
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ free_gb.stdout }} GB free — every node must hold ~164 GiB"
+
+# ============================================================
+# PLAY 2: Ensure EXL3 model + DFlash2 fully cached on head
+# ============================================================
+- name: Download EXL3 weights + DFlash2 on head node (spark-e116)
+  hosts: spark-e116.local
+  gather_facts: no
+
+  vars:
+    model_repo: "Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw"
+    fallback_repo: "brandonmusic/GLM-5.3-Flash-tr3-4bpw"
+    dflash_repo: "incoai/GLM-5.3-Flash-DFlash2"
+    dflash_revision: "7d74cdd881ed7e32c31175984a67823127b66cfe"
+    model_revision: "25a44fdbf16862a46b7cc9921142c6c81350af2f"
+    hub: "/home/spark/.cache/huggingface"
+    hub_dir: "/home/spark/.cache/huggingface/hub"
+    model_cache: "models--Mia-AiLab--GLM-5.3-Flash-EXL3-TR3-4bpw"
+    fallback_cache: "models--brandonmusic--GLM-5.3-Flash-tr3-4bpw"
+    dflash_cache: "models--incoai--GLM-5.3-Flash-DFlash2"
+    expected_shards: 120
+
+  tasks:
+    - name: Discover current snapshot + incomplete blob state
+      ansible.builtin.shell: |
+        N=$(find {{ hub_dir }}/{{ model_cache }}/snapshots -name '*.safetensors' 2>/dev/null | wc -l | tr -d ' ')
+        INC=$(find {{ hub_dir }}/{{ model_cache }}/blobs -name '*.incomplete' 2>/dev/null | wc -l | tr -d ' ')
+        NF=$(find {{ hub_dir }}/{{ fallback_cache }}/snapshots -name '*.safetensors' 2>/dev/null | wc -l | tr -d ' ')
+        DINC=$(find {{ hub_dir }}/{{ dflash_cache }}/snapshots -name 'model.safetensors' 2>/dev/null | wc -l | tr -d ' ')
+        echo "N_SHARDS=$N INCOMPLETE=$INC FALLBACK_SHARDS=$NF DFLASH_SNAPS=$DINC"
+      register: model_check
+      changed_when: false
+
+    - name: Download or resume EXL3 target model (resumable; no-op when 120/120 complete)
+      ansible.builtin.shell: |
+        hf download {{ model_repo }} --revision {{ model_revision }}
+      environment:
+        HF_HOME: "{{ hub }}"
+      register: dl
+      changed_when: false
+      async: 28800
+      poll: 30
+      when: >-
+        (model_check.stdout | regex_search('^N_SHARDS=(?!120)', multiline=True) is not none) or
+        (model_check.stdout | regex_search('^INCOMPLETE=[1-9]', multiline=True) is not none)
+
+    - name: Download fallback EXL3 model only if target still incomplete
+      ansible.builtin.shell: |
+        hf download {{ fallback_repo }}
+      environment:
+        HF_HOME: "{{ hub }}"
+      register: dl_fb
+      changed_when: false
+      async: 28800
+      poll: 30
+      when: >-
+        (model_check.stdout | regex_search('^N_SHARDS=(?!120)', multiline=True) is not none) and
+        (model_check.stdout | regex_search('^FALLBACK_SHARDS=(?!120)', multiline=True) is not none)
+
+    - name: Download or resume DFlash2 draft
+      ansible.builtin.shell: |
+        hf download {{ dflash_repo }} --revision {{ dflash_revision }}
+      environment:
+        HF_HOME: "{{ hub }}"
+      register: dl_df
+      changed_when: false
+      async: 7200
+      poll: 30
+      when: model_check.stdout | regex_search('^DFLASH_SNAPS=0', multiline=True) is not none
+
+    - name: Verify head copies complete
+      ansible.builtin.shell: |
+        N=$(find {{ hub_dir }}/{{ model_cache }}/snapshots -name '*.safetensors' 2>/dev/null | wc -l | tr -d ' ')
+        NF=$(find {{ hub_dir }}/{{ fallback_cache }}/snapshots -name '*.safetensors' 2>/dev/null | wc -l | tr -d ' ')
+        D=$(find {{ hub_dir }}/{{ dflash_cache }}/snapshots -name 'model.safetensors' 2>/dev/null | wc -l | tr -d ' ')
+        echo "target=$N fallback=$NF dflash=$D"
+      register: head_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Display head model status
+      ansible.builtin.debug:
+        msg: "head: {{ head_verify.stdout }} (target needs >= {{ expected_shards }} shards; one of target/fallback must be complete; dflash needs >=1)"
+
+# ============================================================
+# PLAY 3: Rsync complete EXL3 model + DFlash2 to both workers over LAN
+# ============================================================
+- name: Rsync EXL3 weights + DFlash2 to both workers (only when head copies complete)
+  hosts: spark-e116.local
+  gather_facts: no
+
+  vars:
+    hub_dir: "/home/spark/.cache/huggingface/hub"
+    model_cache: "models--Mia-AiLab--GLM-5.3-Flash-EXL3-TR3-4bpw"
+    dflash_cache: "models--incoai--GLM-5.3-Flash-DFlash2"
+    expected_shards: 120
+    # Staging runs over the QSFP triangle from the head (200 Gb/s), not the LAN.
+    # Verified wiring 2026-09-21: link1 = e116 enp1s0f0np0 10.10.1.1 <-> 3ff5
+    # enp1s0f1np1 10.10.1.3 ; link2 = e116 enp1s0f1np1 10.10.0.1 <-> 2ca4
+    # enp1s0f0np0 10.10.0.2. e116's id_ed25519_shared key is authorized on 3ff5.
+    worker_fabric_targets:
+      - { host: "10.10.0.2", label: "gx10-2ca4 via link2" }
+      - { host: "10.10.1.3", label: "spark-3ff5 via link1" }
+
+  tasks:
+    - name: Confirm head copies are complete before rsync
+      ansible.builtin.shell: |
+        N=$(find {{ hub_dir }}/{{ model_cache }}/snapshots -name '*.safetensors' 2>/dev/null | wc -l | tr -d ' ')
+        NF=$(find {{ hub_dir }}/models--brandonmusic--GLM-5.3-Flash-tr3-4bpw/snapshots -name '*.safetensors' 2>/dev/null | wc -l | tr -d ' ')
+        D=$(find {{ hub_dir }}/{{ dflash_cache }}/snapshots -name 'model.safetensors' 2>/dev/null | wc -l | tr -d ' ')
+        { [ "$N" -ge {{ expected_shards }} ] || [ "$NF" -ge {{ expected_shards }} ]; } && [ "$D" -ge 1 ] && echo COMPLETE || echo PENDING_INCOMPLETE
+      register: head_ready
+      changed_when: false
+
+    - name: Sync target model + DFlash2 to each worker over the QSFP triangle (resumable)
+      ansible.builtin.shell: |
+        set -e
+        RSYNC_SSH="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+        for TGT in {{ worker_fabric_targets | map(attribute='host') | join(' ') }}; do
+          for CACHE in {{ model_cache }} {{ dflash_cache }}; do
+            SRC="{{ hub_dir }}/{{ CACHE }}"
+            [ -d "$SRC" ] || continue
+            if rsync -ain --delete -e "$RSYNC_SSH" "${SRC}" spark@${TGT}:{{ hub_dir }}/ | grep -q .; then
+              echo "Syncing ${CACHE} -> ${TGT} over fabric ..."
+              rsync -a --info=progress2 --delete -e "$RSYNC_SSH" "${SRC}/" spark@${TGT}:{{ hub_dir }}/${CACHE}/
+            else
+              echo "Already synced: ${CACHE} -> ${TGT}"
+            fi
+          done
+        done
+      register: rsync_out
+      changed_when: "'Syncing' in (rsync_out.stdout | default(''))"
+      async: 28800
+      poll: 120
+      when: head_ready.stdout == "COMPLETE"
+
+    - name: Warn if head transfer still in progress (no rsync yet)
+      ansible.builtin.debug:
+        msg: "Head transfer still in progress — not syncing to workers yet. Re-run 'just download-glm-exl3' when complete."
+      when: head_ready.stdout != "COMPLETE"
+
+# ============================================================
+# PLAY 4: Verify model + DFlash2 on both workers
+# ============================================================
+- name: Verify model + DFlash2 on worker nodes
+  hosts: fire_workers
+  gather_facts: no
+
+  vars:
+    hub_dir: "/home/spark/.cache/huggingface/hub"
+    model_cache: "models--Mia-AiLab--GLM-5.3-Flash-EXL3-TR3-4bpw"
+    dflash_cache: "models--incoai--GLM-5.3-Flash-DFlash2"
+    expected_shards: 120
+
+  tasks:
+    - name: Verify model + DFlash2 on worker
+      ansible.builtin.shell: |
+        N=$(find {{ hub_dir }}/{{ model_cache }}/snapshots -name '*.safetensors' 2>/dev/null | wc -l | tr -d ' ')
+        NF=$(find {{ hub_dir }}/models--brandonmusic--GLM-5.3-Flash-tr3-4bpw/snapshots -name '*.safetensors' 2>/dev/null | wc -l | tr -d ' ')
+        D=$(find {{ hub_dir }}/{{ dflash_cache }}/snapshots -name 'model.safetensors' 2>/dev/null | wc -l | tr -d ' ')
+        echo "target=$N fallback=$NF dflash=$D"
+      register: worker_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Print worker verification
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} (rank {{ node_rank }}): {{ worker_verify.stdout }} (one of target/fallback must be >= {{ expected_shards }} shards, dflash >=1)"

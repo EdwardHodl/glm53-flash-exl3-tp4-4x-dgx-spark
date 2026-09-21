@@ -1,0 +1,70 @@
+---
+# fabric-check.yml — Verify the QSFP direct-attach triangle is up: on each node,
+# every configured fabric HCA must be ACTIVE and its fabric IP must answer ping
+# from the node at the other end of that link.
+#
+# Links (see README "QSFP triangle cabling"):
+#   A: e116 10.10.0.1 <-> 2ca4 10.10.0.2   (rocep1s0f1 both)
+#   B: e116 10.10.1.1 <-> 3ff5 10.10.1.3   (e116 rocep1s0f0 / 3ff5 rocep1s0f0)
+#   C: 2ca4 10.10.2.2 <-> 3ff5 10.10.2.3   (2ca4 rocep1s0f0 / 3ff5 rocep1s0f1)
+#
+# Usage: just fabric-check
+# ============================================================
+- name: Check fabric port states on all 3 nodes
+  hosts: fire_nodes
+  gather_facts: no
+  tasks:
+    - name: IB port states for configured HCAs
+      ansible.builtin.shell: |
+        for hca in {{ fabric_hcas | join(' ') }}; do
+          echo "$hca: $(cat /sys/class/infiniband/$hca/ports/1/state 2>/dev/null || echo MISSING)"
+        done
+      register: ports
+      changed_when: false
+
+    - name: Fabric IPs present
+      ansible.builtin.shell: |
+        for ip in {{ fabric_ips | join(' ') }}; do
+          ip -4 -o addr | grep -q "$ip/" && echo "$ip: assigned" || echo "$ip: NOT ASSIGNED"
+        done
+      register: ips
+      changed_when: false
+
+    - name: Display
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} | {{ ports.stdout_lines | join(' | ') }} | {{ ips.stdout_lines | join(' | ') }}"
+
+# ============================================================
+- name: Ping across each verified link (e116 side)
+  hosts: spark-e116.local
+  gather_facts: no
+  tasks:
+    - name: link1 (->3ff5), link2 (->2ca4)
+      ansible.builtin.shell: |
+        ping -c 3 -W 2 -I {{ item.if }} {{ item.peer }} >/dev/null 2>&1 && echo "{{ item.label }} OK" || echo "{{ item.label }} FAIL"
+      changed_when: false
+      loop:
+        - { if: enp1s0f0np0, peer: "10.10.1.3", label: "link1 e116f0->3ff5f1" }
+        - { if: enp1s0f1np1, peer: "10.10.0.2", label: "link2 e116f1->2ca4f0" }
+
+- hosts: gx10-2ca4.local
+  gather_facts: no
+  tasks:
+    - name: link2 (->e116), link3 (->3ff5)
+      ansible.builtin.shell: |
+        ping -c 3 -W 2 -I {{ item.if }} {{ item.peer }} >/dev/null 2>&1 && echo "{{ item.label }} OK" || echo "{{ item.label }} FAIL"
+      changed_when: false
+      loop:
+        - { if: enp1s0f0np0, peer: "10.10.0.1", label: "link2 2ca4f0->e116f1" }
+        - { if: enp1s0f1np1, peer: "10.10.2.3", label: "link3 2ca4f1->3ff5f0" }
+
+- hosts: spark-3ff5.local
+  gather_facts: no
+  tasks:
+    - name: link3 (->2ca4), link1 (->e116)
+      ansible.builtin.shell: |
+        ping -c 3 -W 2 -I {{ item.if }} {{ item.peer }} >/dev/null 2>&1 && echo "{{ item.label }} OK" || echo "{{ item.label }} FAIL"
+      changed_when: false
+      loop:
+        - { if: enp1s0f1np1, peer: "10.10.1.1", label: "link1 3ff5f1->e116f0" }
+        - { if: enp1s0f0np0, peer: "10.10.2.2", label: "link3 3ff5f0->2ca4f1" }

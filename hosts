@@ -1,0 +1,19 @@
+# fire — GLM-5.3-Flash-EXL3 TP=3 triangle (ansible ini inventory, mirrors sparks/hosts style)
+# spark-e116.local rank 0 (head, API :8888) | gx10-2ca4.local rank 1 | spark-3ff5.local rank 2
+
+[fire_nodes]
+spark-e116.local ansible_host=spark-e116.local ansible_user=spark
+gx10-2ca4.local  ansible_host=gx10-2ca4.local  ansible_user=spark
+spark-3ff5.local ansible_host=spark-3ff5.local ansible_user=spark ansible_private_key_file=/home/flowai/.ssh/spark_agent_key
+
+[fire_nodes:vars]
+ansible_ssh_private_key_file=~/.ssh/spark_agent_key
+ansible_become=yes
+ansible_become_method=sudo
+
+[fire_heads]
+spark-e116.local
+
+[fire_workers]
+gx10-2ca4.local
+spark-3ff5.local
