@@ -117,8 +117,15 @@ tp3-start:
 tp3-stop:
     ssh spark@spark-e116.local 'cd /home/spark/glm53-tp3 && ./start-tp3.sh stop'
 
-# Follow TP3 logs: just tp3-logs         (head) | just tp3-logs 1 | just tp3-logs 2
+# Follow TP3 logs. Usage:
+#   just tp3-logs            frozen-banner console: health/host banner on top +
+#                            3-column live tails of head/w1/w2 startup logs
+#   just tp3-logs head|w1|w2 single host, banner kept (docker logs -f)
+#   just tp3-logs-raw [n]    upstream launcher's own log view (no banner)
 tp3-logs WHICH="":
+    ./glm/scripts/tp3-tri-view.sh {{WHICH}}
+
+tp3-logs-raw WHICH="":
     ssh -t spark@spark-e116.local 'cd /home/spark/glm53-tp3 && ./start-tp3.sh logs {{WHICH}}'
 
 # Free page cache on all 3 nodes. REQUIRED before a TP3 start: the ~164 GiB
