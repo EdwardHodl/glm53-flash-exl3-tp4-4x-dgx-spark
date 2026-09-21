@@ -97,7 +97,7 @@ test-glm-exl3 +HOST="spark-e116.local":
     }' | python3 -m json.tool || true
     echo ""
     echo "=== Test 4: TP3 container view ==="
-    ssh spark@spark-e116.local "docker ps --filter name=glm53-exl3-tp3 --format '{{.Names}} {{.Status}}'"
+    ssh spark@spark-e116.local 'docker ps --filter name=glm53-exl3-tp3 --format "$(printf "\173\173.Names\175\175 \173\173.Status\175\175")"'
 
 # ── TP=3 lane: upstream start-tp3.sh on the head (the supported TP3 path) ──
 # TP=3 is NOT a flags-only change: 64 attention/KV heads pad to 66 (local 22),
