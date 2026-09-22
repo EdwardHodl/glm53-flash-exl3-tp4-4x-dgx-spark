@@ -155,6 +155,50 @@ very slow TP=3 over wifi to 3ff5).
    192.168.1.28 node; `qwen38-sglang` container can stay until 3ff5's rank-2
    weights are staged, then stop it to free RAM before starting fire).
 
+## Post-tune verification (2026-09-22)
+
+Serving-shape round 2, live-verified on all three nodes. Context: the morning
+probe battery showed TTFT under 4-5 stream load running 5.8x below the
+published bench posture (34k prompt = 137.5 s, 247 tok/s effective) — the
+fair-prefill floor (share 0.30 / chunk 256) was starving deferred prefills.
+
+Changes (commit fafe1e8 + this receipt): KV pool pin
+`--kv-cache-memory-bytes 20000000000` (~787k tok, 2.46x @320k, ~11 GiB
+guaranteed capture slack), `GLM53_INDEXER_WORKSPACE=rightsize` (bench
+posture), FAT tiers 1/1/1 (upstream contract), fair-prefill 0.50 / chunk 512,
+fabric MTU 4092 (was 1500 since bring-up), playbook MNBT 3584→7168 parity.
+3ff5 cleanup: ~80 GB dead qwen images pruned, qwen38 dashboard/keepalive
+units disabled.
+
+Boot saga (4 attempts, root causes, both real):
+
+1. rightsize lets the KV pool SELF-FILL the whole utilization budget
+   (1.16M tok @0.76); graph capture then exceeds the profiler's estimate and
+   UMA refuses the overage against 30+ GiB "free" ("tried 2.35 GiB ... free"
+   = accounting refusal, not capacity). Fix = the pin above.
+2. A boot-window page-cache trimmer MUST wrap the whole load+capture window
+   (~17.5 min, 70x15s) and MUST be sudo-wrapped — a non-sudo loop fails with
+   EACCES on every write (2>/dev/null hides it). Kill at health=200.
+3. Node reboots between attempts cleared UMA fragmentation from the failed
+   boots. One-shot `mem-free` is NOT sufficient at 0.76+rightsize.
+
+Receipt (same probe battery, thinking off, temp 0):
+
+| Probe | pre-tune | post-tune | note |
+|---|---|---|---|
+| tiny ~190 tok, under load | 19.7 s | 1.2 s | 2 bg streams |
+| ~5k prompt | 61.1 s | 4.3 s | |
+| ~16.4k prompt | 74.3 s (220 tok/s) | 12.9 s (1,273 tok/s) | |
+| ~34k prompt | 137.5 s (247 tok/s) | 20.1 s (1,689 tok/s) | at/above the 1,430-1,590 tok/s TP2 bench |
+| 6x16.4k simultaneous | timeout | all TTFT 19.47 s | ~5k tok/s aggregate, uniform admission |
+
+Live state: pool 786,634 tok (2.46x), util 0.76, seqs 6, ctx 320k, graphs
+4/4 captured with zero OOM, tiny TTFT 0.45-0.49 s unloaded, smoke
+`OK FIRE GLM 5.3 EXL3 LIVE TP3` finish=stop, prefix-cache multi-page hits
+confirmed. Next queued experiment: `GLM53_ADAPTIVE_K=ema` (+5-21% decode at
+temp 0 on TP2 receipts) — needs 3/5-token capture shapes; the KV pin's
+~11 GiB capture slack is what was missing when the 40/48 ladder OOM'd.
+
 ## Layout
 
 ```
@@ -177,7 +221,13 @@ fire/
 
 - `dflash_tokens` (7): TP=2 receipts say k=7 wins single-stream; re-measure at
   TP=3 (2 consumers + cron traffic) via mean accepted length.
-- `max_num_seqs` / `max_num_batched_tokens` (4 / 3584): sized for 2 interactive
-  users + cron; TP=3 adds KV capacity, so these can likely rise.
-- `max_model_len` (384000): raise toward 1M only after KV capacity log review
-  (`GLM53_KV_CAPACITY_LOG=1` is on).
+- ~~`max_num_seqs` / `max_num_batched_tokens` (4 / 3584)~~ → **done 2026-09-22:
+  6 / 7168** live-verified (see Post-tune verification above). Next lever:
+  `GLM53_ADAPTIVE_K=ema`.
+- ~~`max_model_len` (384000)~~ → **320000** as of 2026-09-21 (pool/seqs
+  arithmetic; queue threshold ~131k avg tokens/session). Raise only after
+  re-pinning the KV pool with a fresh "Maximum concurrency" line in front of
+  you — the current pin (20e9) sizes the pool to 320k-era receipts.
+- `GLM53_SPINWAIT_MS` (default 2ms in the runtime knob form): TP=2 receipts
+  measured 16ms at +0.95% median decode / −85.3% EngineCore CPU. Unmeasured at
+  TP=3; candidate for the same maintenance window as adaptive-k.
