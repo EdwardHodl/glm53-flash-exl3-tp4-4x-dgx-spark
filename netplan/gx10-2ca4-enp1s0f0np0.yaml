@@ -8,12 +8,14 @@ network:
   version: 2
   ethernets:
     enp1s0f0np0:
+      mtu: 4092
       addresses:
         - 10.10.0.2/24
       nameservers:
         addresses: []
       optional: true
     enp1s0f1np1:
+      mtu: 4092
       addresses:
         - 10.10.2.2/24
       nameservers:

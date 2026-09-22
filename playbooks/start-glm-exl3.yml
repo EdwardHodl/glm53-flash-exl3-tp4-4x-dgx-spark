@@ -336,7 +336,7 @@
     max_model_len: 320000
     gpu_mem_util: 0.76
     max_num_seqs: 6
-    max_num_batched_tokens: 3584
+    max_num_batched_tokens: 7168
     enforce_eager: 0
     language_model_only: 0
     skip_mm_profiling: 1
@@ -449,7 +449,7 @@
     max_model_len: 320000
     gpu_mem_util: 0.76
     max_num_seqs: 6
-    max_num_batched_tokens: 3584
+    max_num_batched_tokens: 7168
     enforce_eager: 0
     language_model_only: 0
     skip_mm_profiling: 1
