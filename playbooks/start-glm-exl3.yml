@@ -333,9 +333,9 @@
     dflash_draft_tp: 1
     dflash_revision: "7d74cdd881ed7e32c31175984a67823127b66cfe"
     mtp_tokens: 2
-    max_model_len: 384000
-    gpu_mem_util: 0.87
-    max_num_seqs: 4
+    max_model_len: 320000
+    gpu_mem_util: 0.76
+    max_num_seqs: 6
     max_num_batched_tokens: 3584
     enforce_eager: 0
     language_model_only: 0
@@ -446,9 +446,9 @@
     dflash_draft_tp: 1
     dflash_revision: "7d74cdd881ed7e32c31175984a67823127b66cfe"
     mtp_tokens: 2
-    max_model_len: 384000
-    gpu_mem_util: 0.87
-    max_num_seqs: 4
+    max_model_len: 320000
+    gpu_mem_util: 0.76
+    max_num_seqs: 6
     max_num_batched_tokens: 3584
     enforce_eager: 0
     language_model_only: 0
