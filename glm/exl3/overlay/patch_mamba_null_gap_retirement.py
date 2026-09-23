@@ -9,6 +9,13 @@ This installer adds a MambaManager override that skips null gaps, tracks the
 already-retired prefix per request, and clears that tracking when the request is
 freed. It is adapted from vLLM PR #55450 to the exact production fork, whose
 MambaManager does not have mainline's ``_num_checkpoint_blocks`` member.
+
+Composes with ``patch_mamba_align_state_free.py`` (upstream PR #238): that
+overlay replaces the ``last_state_block_idx`` tracker with
+``stale_state_block_idxs``, so this installer anchors on the post-state-free
+text and must run AFTER it. State-free releases superseded state blocks on the
+committed-progress predicate; this override only extends retirement to
+non-null blocks sitting before a null gap, which state-free does not cover.
 """
 
 from __future__ import annotations
@@ -29,11 +36,15 @@ TARGET = Path(
 MARK = "# [glm53-mamba-null-gap]"
 
 INIT_OLD = """\
-            self.last_state_block_idx: dict[str, int] = {}
+            self.stale_state_block_idxs: defaultdict[str, list[int]] = defaultdict(
+                list
+            )
             # The set of the requests that have been allocated blocks
 """
 INIT_NEW = """\
-            self.last_state_block_idx: dict[str, int] = {}
+            self.stale_state_block_idxs: defaultdict[str, list[int]] = defaultdict(
+                list
+            )
             # Highest align-mode block prefix already scanned for retirement.
             self._num_retired_blocks: dict[str, int] = {}  # [glm53-mamba-null-gap]
             # The set of the requests that have been allocated blocks
@@ -73,11 +84,11 @@ REMOVE_OVERRIDE = """\
 """
 
 FREE_OLD = """\
-            self.last_state_block_idx.pop(request_id, None)
+            self.stale_state_block_idxs.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
 """
 FREE_NEW = """\
-            self.last_state_block_idx.pop(request_id, None)
+            self.stale_state_block_idxs.pop(request_id, None)
             self._num_retired_blocks.pop(request_id, None)  # [glm53-mamba-null-gap]
             self._producer_partial_tail_reqs.pop(request_id, None)
 """

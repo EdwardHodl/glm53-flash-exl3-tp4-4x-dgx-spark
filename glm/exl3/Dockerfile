@@ -481,6 +481,7 @@ COPY overlay/patch_suppress_stops_in_reasoning.py /opt/glm53/patch_suppress_stop
 COPY tests/test_suppress_stops.py /opt/glm53/test_suppress_stops.py
 COPY overlay/patch_scheduler_decode_floor.py /opt/glm53/patch_scheduler_decode_floor.py
 COPY tests/test_scheduler_decode_floor.py /opt/glm53/test_scheduler_decode_floor.py
+COPY overlay/patch_mamba_align_chunking.py /opt/glm53/patch_mamba_align_chunking.py
 COPY overlay/patch_model_overrides.py /opt/glm53/patch_model_overrides.py
 COPY overlay/qwen3_dflash2.py /opt/glm53/qwen3_dflash2.py
 COPY overlay/dflash2_speculator.py /opt/glm53/dflash2_speculator.py
@@ -508,6 +509,7 @@ COPY overlay/patch_spinwait.py /opt/glm53/patch_spinwait.py
 COPY tests/test_spinwait_patch.py /opt/glm53/test_spinwait_patch.py
 COPY overlay/patch_apc_per_group_retention.py /opt/glm53/patch_apc_per_group_retention.py
 COPY tests/test_apc_per_group_retention.py /opt/glm53/test_apc_per_group_retention.py
+COPY overlay/patch_mamba_align_state_free.py /opt/glm53/patch_mamba_align_state_free.py
 COPY overlay/patch_adaptive_k.py /opt/glm53/patch_adaptive_k.py
 COPY tests/test_adaptive_k_patch.py /opt/glm53/test_adaptive_k_patch.py
 COPY overlay/patch_dense_fp8.py /opt/glm53/patch_dense_fp8.py
@@ -521,8 +523,10 @@ RUN python3 /opt/glm53/patch_glm_eagle3.py
 RUN python3 /opt/glm53/patch_glm5_drafter_group.py
 RUN python3 /opt/glm53/patch_suppress_stops_in_reasoning.py
 RUN python3 /opt/glm53/patch_scheduler_decode_floor.py
+RUN python3 /opt/glm53/patch_mamba_align_chunking.py
 RUN python3 /opt/glm53/patch_hybrid_prefix_hit.py
 RUN python3 /opt/glm53/patch_apc_per_group_retention.py
+RUN python3 /opt/glm53/patch_mamba_align_state_free.py
 RUN python3 /opt/glm53/patch_adaptive_k.py
 RUN python3 /opt/glm53/patch_dense_fp8.py
 RUN python3 /opt/glm53/patch_default_max_new_tokens.py

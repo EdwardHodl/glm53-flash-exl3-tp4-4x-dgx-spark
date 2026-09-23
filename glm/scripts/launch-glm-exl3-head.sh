@@ -137,12 +137,14 @@ if [ -n "${EXTRA_ARGS:-}" ]; then
 fi
 
 [ -f "${MODEL_DIR}/config.json" ] || { say "FATAL: ${MODEL_DIR}/config.json missing"; ls -la "${MODEL_DIR}" | head; exit 1; }
-for p in patch_w28_correctness.py patch_mamba_null_gap_retirement.py \
+for p in patch_w28_correctness.py \
          patch_glm_video_placeholders.py patch_suppress_stops_in_reasoning.py \
-         patch_scheduler_decode_floor.py patch_glm5_drafter_group.py \
+         patch_scheduler_decode_floor.py patch_mamba_align_chunking.py \
+         patch_glm5_drafter_group.py \
          patch_hybrid_prefix_hit.py patch_xgrammar_termination.py \
          patch_kpool_tail_slotmap.py patch_router_gemm_gb10.py patch_cache_reset.py \
          patch_fine_grained_apc.py patch_apc_per_group_retention.py \
+         patch_mamba_align_state_free.py patch_mamba_null_gap_retirement.py \
          patch_reasoning_noopener.py \
          patch_apc_no_store.py patch_kv_capacity_log.py \
          patch_adaptive_k.py patch_dense_fp8.py patch_default_max_new_tokens.py; do

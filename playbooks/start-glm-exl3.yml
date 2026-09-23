@@ -186,6 +186,7 @@
         - "patch_glm_video_placeholders.py"
         - "patch_suppress_stops_in_reasoning.py"
         - "patch_scheduler_decode_floor.py"
+        - "patch_mamba_align_chunking.py"
         - "patch_glm5_drafter_group.py"
         - "patch_hybrid_prefix_hit.py"
         - "patch_xgrammar_termination.py"
@@ -194,6 +195,7 @@
         - "patch_cache_reset.py"
         - "patch_fine_grained_apc.py"
         - "patch_apc_per_group_retention.py"
+        - "patch_mamba_align_state_free.py"
         - "patch_reasoning_noopener.py"
         - "patch_apc_no_store.py"
         - "patch_kv_capacity_log.py"
@@ -251,6 +253,7 @@
           -e VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA=0 \
           -e GLM53_APC_NO_STORE=1 \
           -e GLM53_KV_CAPACITY_LOG=1 \
+          -e GLM53_DRAFT_KV_COMPACT={{ glm53_draft_kv_compact | default(1) }} \
           -e GLM53_MIXED_PREFILL_CHUNK=fair \
           -e GLM53_FAIR_PREFILL_CHUNK=256 \
           -e GLM53_FAIR_PREFILL_SHARE=0.30 \
@@ -271,10 +274,12 @@
         docker exec {{ fire_container }} chmod +x /tmp/launch.sh
         docker exec {{ fire_container }} mkdir -p /opt/glm53
         for p in patch_glm_video_placeholders.py patch_suppress_stops_in_reasoning.py \
-                 patch_scheduler_decode_floor.py patch_glm5_drafter_group.py \
+                 patch_scheduler_decode_floor.py patch_mamba_align_chunking.py \
+                 patch_glm5_drafter_group.py \
                  patch_hybrid_prefix_hit.py patch_xgrammar_termination.py \
                  patch_kpool_tail_slotmap.py patch_router_gemm_gb10.py patch_cache_reset.py \
                  patch_fine_grained_apc.py patch_apc_per_group_retention.py \
+                 patch_mamba_align_state_free.py \
                  patch_reasoning_noopener.py \
                  patch_apc_no_store.py patch_kv_capacity_log.py \
                  patch_adaptive_k.py patch_dense_fp8.py patch_default_max_new_tokens.py \
@@ -408,6 +413,7 @@
           export EXL3_FAT_GROUPED=1;
           export EXL3_TEMP_ROWS_FUSED=32;
           export GLM53_INDEXER_WORKSPACE=rightsize;
+          export GLM53_DRAFT_KV_COMPACT={{ glm53_draft_kv_compact | default(1) }};
           export EXTRA_ARGS="--no-async-scheduling";
           export VLLM_ENGINE_READY_TIMEOUT_S=3600;
           export FABRIC_MODE={{ fabric_mode | default("ib") }};
@@ -521,6 +527,7 @@
           export EXL3_FAT_GROUPED=1;
           export EXL3_TEMP_ROWS_FUSED=32;
           export GLM53_INDEXER_WORKSPACE=rightsize;
+          export GLM53_DRAFT_KV_COMPACT={{ glm53_draft_kv_compact | default(1) }};
           export EXTRA_ARGS="--no-async-scheduling";
           export VLLM_ENGINE_READY_TIMEOUT_S=3600;
           export FABRIC_MODE={{ fabric_mode | default("ib") }};
