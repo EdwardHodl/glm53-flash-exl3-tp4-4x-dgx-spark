@@ -156,3 +156,43 @@ tp3-drafter-sync:
           /home/spark/.cache/huggingface/glm53-tp3-draft/ spark@$ip:/home/spark/.cache/huggingface/glm53-tp3-draft/
       done
       echo "drafter staged on both workers"'
+
+# ── TP=4 quad lane (ring: e116 r0 head -> dc90 r1 -> 3ff5 r2 -> 2ca4 r3) ─────
+
+# Free page cache on all 4 nodes. REQUIRED before a TP4 start (GB10 unified
+# memory: staging/page cache counts against CUDA; see README boot saga).
+mem-free-quad:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for h in spark-e116.local; do
+      ssh -o BatchMode=yes spark@$h 'free -g | awk "/Mem:/{print \"  '\"$h\"' avail=\"\$7\"G\"}"; sudo sh -c "sync; echo 3 > /proc/sys/vm/drop_caches"'
+    done
+    for h in gx10-dc90.local gx10-2ca4.local spark-3ff5.local; do
+      ssh -i /home/flowai/.ssh/spark_agent_key -o BatchMode=yes spark@$h \
+        'free -g | awk "/Mem:/{print \"  '\"$h\"' avail=\"\$7\"G\"}"; sudo sh -c "sync; echo 3 > /proc/sys/vm/drop_caches"'
+    done
+
+# TP4 status (upstream launcher status on the head)
+tp4-status:
+    ssh spark@spark-e116.local 'cd /home/spark/glm53-tp3 && ./start-tp4.sh status'
+
+# TP4 bring-up: mem-free-quad then upstream start-tp4.sh (workers 3->2->1 then
+# head 0, health wait + smoke). First run needs the mem-free ritual and a
+# ~17-20 min boot. Stop TP3 first: port 8888 collides.
+tp4-start:
+    just mem-free-quad
+    ssh spark@spark-e116.local 'cd /home/spark/glm53-tp3 && ./start-tp4.sh'
+
+tp4-stop:
+    ssh spark@spark-e116.local 'cd /home/spark/glm53-tp3 && ./start-tp4.sh stop'
+
+# Quad log view: frozen banner (API health + per-rank container/mem/load) on
+# top + 4-column live tails of head/w1/w2/w3 container logs.
+#   just tp4-logs            live quad view
+#   just tp4-logs head|w1|w2|w3   follow one host's container log
+#   just tp4-logs-raw        upstream launcher's own log view
+tp4-logs WHICH="":
+    ./glm/scripts/tp4-quad-view.sh {{WHICH}}
+
+tp4-logs-raw WHICH="":
+    ssh -t spark@spark-e116.local 'cd /home/spark/glm53-tp3 && ./start-tp4.sh logs {{WHICH}}'
