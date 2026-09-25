@@ -1,0 +1,32 @@
+# gx10-dc90.local — fire-quad ring fabric (MAC-verified 2026-09-25)
+# rank 1 | edge B: f0  = 10.10.3.1/24 -> 3ff5 enp1s0f1np1   (10.10.3.2)
+#          edge A: P2f1 = 10.10.1.2/24 -> e116 enp1s0f0np0 (10.10.1.1)
+# NOTE: edge A lands on enP2p1s0f1np1 — the second PCIe view of cage P2 (existing
+# deepseek-era netplan already addressed this port; keep it).
+# REPLACES the old 10.10.0.2/24 on enp1s0f1np1 (duplicated 2ca4's address).
+# Deploy to /etc/netplan/60-quad-ring.yaml (and REMOVE the old 40/50-cx7 file that
+# holds 10.10.0.2 + 10.10.1.2), then: sudo netplan apply
+network:
+  version: 2
+  ethernets:
+    enp1s0f0np0:
+      mtu: 9000
+      addresses:
+        - 10.10.3.1/24
+      nameservers:
+        addresses: []
+      optional: true
+    enP2p1s0f1np1:
+      mtu: 9000
+      addresses:
+        - 10.10.1.2/24
+      nameservers:
+        addresses: []
+      optional: true
+    # second views: MTU 9000, no address
+    enp1s0f1np1:
+      mtu: 9000
+      optional: true
+    enP2p1s0f0np0:
+      mtu: 9000
+      optional: true

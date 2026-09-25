@@ -1,0 +1,22 @@
+# spark-3ff5.local — fire-quad ring fabric (MAC-verified 2026-09-25)
+# rank 2 | edge C: f0 = 10.10.2.3/24 -> 2ca4 enp1s0f1np1 (10.10.2.4)
+#          edge B: f1 = 10.10.3.2/24 -> dc90 enp1s0f0np0 (10.10.3.1)
+# Deploy to /etc/netplan/60-quad-ring.yaml, then: sudo netplan apply
+# (keep any existing older fabric file consistent — f1 moves 10.10.1.3 -> 10.10.3.2)
+network:
+  version: 2
+  ethernets:
+    enp1s0f0np0:
+      mtu: 9000
+      addresses:
+        - 10.10.2.3/24
+      nameservers:
+        addresses: []
+      optional: true
+    enp1s0f1np1:
+      mtu: 9000
+      addresses:
+        - 10.10.3.2/24
+      nameservers:
+        addresses: []
+      optional: true

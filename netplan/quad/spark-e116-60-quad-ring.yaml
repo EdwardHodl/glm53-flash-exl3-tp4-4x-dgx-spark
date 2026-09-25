@@ -1,0 +1,22 @@
+# spark-e116.local — fire-quad ring fabric (MAC-verified 2026-09-25)
+# rank 0 | edge A: f0 = 10.10.1.1/24 -> dc90 enP2p1s0f1np1 (10.10.1.2)
+#          edge D: f1 = 10.10.0.1/24 -> 2ca4 enp1s0f0np0  (10.10.0.3)
+# Deploy to /etc/netplan/60-quad-ring.yaml, then: sudo netplan apply
+# Target MTU 9000 (was 4092) — apply on all 4 nodes in one window.
+network:
+  version: 2
+  ethernets:
+    enp1s0f0np0:
+      mtu: 9000
+      addresses:
+        - 10.10.1.1/24
+      nameservers:
+        addresses: []
+      optional: true
+    enp1s0f1np1:
+      mtu: 9000
+      addresses:
+        - 10.10.0.1/24
+      nameservers:
+        addresses: []
+      optional: true

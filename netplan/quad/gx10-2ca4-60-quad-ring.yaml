@@ -1,0 +1,23 @@
+# gx10-2ca4.local — fire-quad ring fabric (MAC-verified 2026-09-25)
+# rank 3 | edge D: f0 = 10.10.0.3/24 -> e116 enp1s0f1np1 (10.10.0.1)
+#          edge C: f1 = 10.10.2.4/24 -> 3ff5 enp1s0f0np0 (10.10.2.3)
+# Deploy to /etc/netplan/60-quad-ring.yaml (supersedes the fire-triangle
+# 50-qfsp file — f0 moves 10.10.0.2 -> 10.10.0.3, f1 moves 10.10.2.2 -> 10.10.2.4),
+# then: sudo netplan apply
+network:
+  version: 2
+  ethernets:
+    enp1s0f0np0:
+      mtu: 9000
+      addresses:
+        - 10.10.0.3/24
+      nameservers:
+        addresses: []
+      optional: true
+    enp1s0f1np1:
+      mtu: 9000
+      addresses:
+        - 10.10.2.4/24
+      nameservers:
+        addresses: []
+      optional: true
