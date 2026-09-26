@@ -1,7 +1,16 @@
 # fire-quad — adoption of alexellis 4x-switchless recipe (staged vs required)
 
-Date: 2026-09-26. Status: PROPOSAL — nothing downloaded/rebuilt/restarted; all 4 crashed TP4 containers cleanly stopped
-(verified: 0 tp4 containers, 0 GPU processes on all 4 nodes).
+Date: 2026-09-26. Status: **DEPLOYED — GATE GREEN 2026-09-26 00:04** (needle+tool-call+decode 4/4 PASS,
+:8888 serving `glm-5.3-flash`). Deviations from the recipe, all verified in receipts below:
+weights = `nvidia/GLM-5.3-Flash-NVFP4` @ `09b04e5e` (Edward's call, 190.4 GiB, flat-dir staged on all 4 ranks
+via QSFP fan-out ~400 MB/s/leg), API port 8888 (fire crons), MGMT_IF pinned per node (dynamic route-get
+resolves `lo` on the head and Gloo binds 127.0.0.1), `$CACHE_DIR/root-cache` bind-mounted to
+`/root/.cache` (flashinfer/tilelang JIT persistence — without it every boot recompiles),
+48G swap/node (JIT nvcc+cicc spikes ~6G anon against UMA; 3 kernel OOMs before this).
+
+Boot saga (6 attempts): 1 dangle-symlink HF-cache trap → 2 Gloo/lo bind → 3-5 kernel OOM during
+JIT on the low-free-memory node (dc90 4x; dc90 rebooted + swap + persistent caches fixed it)
+→ 6 GREEN. Launch ritual that works: `just quad-up` (mem-free → cluster-up with quad-launcher/cluster.env).
 
 ## Target configuration (per Edward's instruction — alexellis recipe, as closely as possible)
 

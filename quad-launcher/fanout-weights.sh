@@ -6,7 +6,7 @@
 # Run ON spark-e116:  ~/fire-quad/scripts/fanout-weights.sh
 set -euo pipefail
 SRC="$HOME/glm53-nvfp4"
-NFILES_EXPECTED=44
+NFILES_EXPECTED=42
 
 count=$(ls "$SRC" | wc -l)
 [[ "$count" -eq "$NFILES_EXPECTED" ]] || { echo "src incomplete: $count files (want $NFILES_EXPECTED)" >&2; exit 1; }

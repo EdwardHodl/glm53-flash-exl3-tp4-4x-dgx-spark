@@ -211,12 +211,12 @@ quad-verify:
     bash quad-launcher/verify-fabric.sh
 
 # Bring up the quad (workers 3->2->1 headless, then head 0; preflights + gate).
-# Runs the recipe's cluster-up.sh with our site config. Takes ~15-20 min.
+# Runs the recipe's cluster-up.sh with our site config. Takes ~15-30 min cold.
 quad-up:
-    just mem-free-quad
     #!/usr/bin/env bash
     set -euo pipefail
-    cd {{QUAD_RECIPE}}
+    cd "{{justfile_directory()}}" && just mem-free-quad
+    cd "{{QUAD_RECIPE}}"
     GLM53_CLUSTER_CONFIG="{{justfile_directory()}}/{{QUAD_CFG}}" bash scripts/cluster-up.sh
 
 # Remove the quad containers on all 4 ranks.

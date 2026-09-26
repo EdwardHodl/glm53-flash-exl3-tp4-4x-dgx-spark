@@ -32,9 +32,14 @@ case "$(hostname)" in
   *)         IB_HCA="rocep1s0f0,rocep1s0f1"   ;;
 esac
 
-# Management interface on THIS node — discovered from the route toward MASTER.
-MGMT_IF=$(ip -o -4 route get "$MASTER" 2>/dev/null | grep -oE 'dev [^ ]+' | awk '{print $2}')
-: "${MGMT_IF:?could not discover management interface toward $MASTER}"
+# Management interface on THIS node — pinned per node. (Dynamic discovery via
+# `ip route get $MASTER` resolves to `lo` on the head itself, which makes Gloo
+# bind 127.0.0.1 and every worker time out; e116's mgmt NIC is enP7s7, workers
+# use wlP9s9 — see fire recipe-env/env.tp4 CX7_IF entries.)
+case "$(hostname)" in
+  spark-e116) MGMT_IF="enP7s7" ;;
+  *)          MGMT_IF="wlP9s9" ;;
+esac
 
 # ─── fixed recipe — do not change (alexellis, docs/recipe.md) ────────────────
 R="${1:?usage: rank-launcher.sh <rank 0..3>}"
@@ -128,6 +133,7 @@ docker run -d --name "$NAME" --restart no \
   -v "$DRAFT_DIR:/draft:ro" \
   -v "$NCCL_DIR:/opt/patched-nccl:ro" \
   -v "$CACHE_DIR:/cache" \
+  -v "$CACHE_DIR/root-cache:/root/.cache" \
   -v "$CHAT_TEMPLATE:/opt/glm53/chat_template.jinja:ro" \
   -e LD_PRELOAD=/opt/patched-nccl/libnccl.so.2 -e VLLM_NCCL_SO_PATH=/opt/patched-nccl/libnccl.so.2 \
   -e NCCL_SKIP_TREE_CONNECT=1 -e NCCL_SWITCHLESS_RING_ONLY=1 \
