@@ -125,6 +125,21 @@ else
   TAIL=(--headless)
 fi
 
+# E27c/E29 scheduler override (jnardiello R10 port) — OFF by default.
+# quad-merge-20260926: R10 scheduler references five symbols absent in v11
+# (RequestSpecDecodeMetrics, uses_xdrope, adaptive_speculative_tokens_window,
+# per_request_spec_decode_metrics, is_mm_encoder_only). Shims for four are in
+# scheduler-e27c/scheduler.py; the fifth still aborts engine init. Flip to "on"
+# only after the symbol-map pass in quad-launcher/receipts/ completes.
+SCHED_MOUNT=()
+SCHED_ENV=()
+SCHED_ARGS=()
+if [ "${QUAD_E27C_SCHEDULER:-off}" = "on" ]; then
+  SCHED_MOUNT=(-v "$CACHE_DIR/scheduler-e27c/scheduler.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/core/sched/scheduler.py:ro")
+  SCHED_ENV=(-e VLLM_E27B_SHORT_PREFILL_TOKENS=2048 -e VLLM_E27C_CADENCE_WHEN_QUEUED=1)
+  SCHED_ARGS=(--async-scheduling --prefill-schedule-interval 8)
+fi
+
 docker run -d --name "$NAME" --restart no \
   --cap-add IPC_LOCK --ulimit memlock=-1:-1 \
   --network host --ipc host --shm-size 32g --gpus all \
@@ -135,7 +150,7 @@ docker run -d --name "$NAME" --restart no \
   -v "$CACHE_DIR:/cache" \
   -v "$CACHE_DIR/root-cache:/root/.cache" \
   -v "$CHAT_TEMPLATE:/opt/glm53/chat_template.jinja:ro" \
-  -v "$CACHE_DIR/scheduler-e27c/scheduler.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/core/sched/scheduler.py:ro" \
+  "${SCHED_MOUNT[@]}" \
   -e LD_PRELOAD=/opt/patched-nccl/libnccl.so.2 -e VLLM_NCCL_SO_PATH=/opt/patched-nccl/libnccl.so.2 \
   -e NCCL_SKIP_TREE_CONNECT=1 -e NCCL_SWITCHLESS_RING_ONLY=1 \
   -e NCCL_SOCKET_IFNAME="$MGMT_IF" -e GLOO_SOCKET_IFNAME="$MGMT_IF" -e VLLM_HOST_IP="$MIP" \
@@ -146,7 +161,7 @@ docker run -d --name "$NAME" --restart no \
   -e NCCL_MIN_NCHANNELS=4 -e NCCL_MAX_NCHANNELS=4 -e NCCL_CROSS_NIC=1 -e NCCL_CUMEM_ENABLE=0 \
   -e NCCL_IGNORE_CPU_AFFINITY=1 -e NCCL_DEBUG="$NCCL_DEBUG" -e NCCL_DEBUG_SUBSYS="$NCCL_DEBUG_SUBSYS" \
   -e VLLM_ONE_GPU_PER_NODE=1 -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-  -e VLLM_E27B_SHORT_PREFILL_TOKENS=2048 -e VLLM_E27C_CADENCE_WHEN_QUEUED=1 \
+  "${SCHED_ENV[@]}" \
   -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e PYTHONUNBUFFERED=1 \
   -e HF_HOME=/cache/hf -e XDG_CACHE_HOME=/cache -e VLLM_CACHE_ROOT=/cache/vllm \
   -e NODE_RANK="$R" -e MASTER_ADDR="$MASTER" \
@@ -158,7 +173,7 @@ docker run -d --name "$NAME" --restart no \
     --master-addr "$MASTER" --master-port "$MPORT" \
     --gpu-memory-utilization 0.85 --max-model-len 262144 \
     --max-num-seqs 6 --block-size 2304 --moe-backend marlin \
-    --async-scheduling --prefill-schedule-interval 8 \
+    "${SCHED_ARGS[@]}" \
     --limit-mm-per-prompt '{"image":16}' \
     --kv-cache-dtype fp8_e4m3 --kv-cache-memory 12884901888 \
     --speculative-config '{"method":"dflash","model":"/draft","num_speculative_tokens":7}' \

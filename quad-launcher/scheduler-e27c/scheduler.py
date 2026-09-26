@@ -57,9 +57,20 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import (
     PrefixCacheStats,
-    RequestSpecDecodeMetrics,
     SchedulerStats,
 )
+
+# FIRE PORT: v11 metrics.stats lacks RequestSpecDecodeMetrics (R10 addition).
+# Stub with a inert .new(); the per-request spec-decode metrics path is only
+# active when observability_config.per_request_spec_decode_metrics != "none"
+# (default "none" — inert in our serving config).
+try:
+    from vllm.v1.metrics.stats import RequestSpecDecodeMetrics
+except ImportError:
+    class RequestSpecDecodeMetrics:  # type: ignore[no-redef]
+        @staticmethod
+        def new(num_spec_tokens):
+            return None
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 # FIRE PORT: v11 image lacks vllm.v1.spec_decode.dynamic.acceptance_length.
@@ -128,14 +139,20 @@ class Scheduler(SchedulerInterface):
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
         self.model_uses_mrope = vllm_config.model_config.uses_mrope
-        self.model_uses_xdrope = vllm_config.model_config.uses_xdrope
+        # FIRE PORT: v11 ModelConfig lacks uses_xdrope (R10 addition); the
+        # from_request call sites no longer pass it either.
+        self.model_uses_xdrope = getattr(vllm_config.model_config,
+                                         'uses_xdrope', False)
         self.kv_cache_config = kv_cache_config
         self.kv_events_config = vllm_config.kv_events_config
         self.parallel_config = vllm_config.parallel_config
         self.log_stats = log_stats
         self.observability_config = vllm_config.observability_config
+        # FIRE PORT: v11 ObservabilityConfig lacks per_request_spec_decode_metrics
+        # (R10 addition); default "none" keeps the per-request metrics path off.
         self.spec_decode_metrics_level = (
-            self.observability_config.per_request_spec_decode_metrics
+            getattr(self.observability_config,
+                    'per_request_spec_decode_metrics', 'none')
         )
         self.kv_metrics_collector: KVCacheMetricsCollector | None = None
         if self.observability_config.kv_cache_metrics:
@@ -323,9 +340,14 @@ class Scheduler(SchedulerInterface):
                     vllm_max_batch_size=self.scheduler_config.max_num_seqs,
                     vllm_num_speculative_tokens=self.num_spec_tokens,
                 )
+            # FIRE PORT: v11 speculative config has no
+            # adaptive_speculative_tokens_window (R10 addition); getattr keeps
+            # observation_window None so the controller is never constructed
+            # (static k=7, matching pre-port serving behavior).
             if (
                 observation_window := (
-                    speculative_config.adaptive_speculative_tokens_window
+                    getattr(speculative_config,
+                            'adaptive_speculative_tokens_window', None)
                 )
             ) is not None:
                 self.acceptance_length_controller = BatchSizeAcceptanceLengthController(
@@ -1468,7 +1490,6 @@ class Scheduler(SchedulerInterface):
                     req_to_new_blocks[req.request_id].get_block_ids(),
                     req._all_token_ids,
                     uses_mrope=self.model_uses_mrope,
-                    uses_xdrope=self.model_uses_xdrope,
                 )
                 for req in scheduled_new_reqs
             ]
@@ -1478,7 +1499,6 @@ class Scheduler(SchedulerInterface):
                     req,
                     req_to_new_blocks[req.request_id].get_block_ids(),
                     uses_mrope=self.model_uses_mrope,
-                    uses_xdrope=self.model_uses_xdrope,
                 )
                 for req in scheduled_new_reqs
             ]
