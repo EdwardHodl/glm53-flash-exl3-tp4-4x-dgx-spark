@@ -6,6 +6,12 @@
 # MODEL_DIR/DRAFT_DIR staged as flat dirs (symlinked into the HF cache).
 #
 # Run the SAME script on every node, passing that node's rank (0..3).
+#
+# Phase 1 (2026-09-26, QUAD-UPGRADE-PLAN.md §Phase 1): KV pin 12 -> 24 GiB/rank,
+# NCCL hardening env (4 vars), prefix caching + knapcio's kv_cache_coordinator
+# repair (toggle QUAD_PREFIX_REPAIR=on|off, default on), mm hygiene (image:16 /
+# video:0, 4 GiB processor cache, --skip-mm-profiling). Overlay files live in
+# $REPO_ROOT/overlay (quad-launcher/overlay in the repo) and are sha-pinned here.
 # Order: workers (ranks 3,2,1) headless first, THEN the head (rank 0) which
 # opens the OpenAI-compatible API on :8888.
 #
@@ -25,6 +31,17 @@ NCCL_DIR="${NCCL_DIR:-$HOME/nccl-switchless-v0.0.1}"
 CACHE_DIR="$HOME/glm53-tp4-cache"
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 CHAT_TEMPLATE="$REPO_ROOT/chat_template.jinja"
+
+# Phase 1 (QUAD-UPGRADE-PLAN.md): vendored overlay mounts, staged to
+# $REPO_ROOT/overlay on every rank. The prefix-cache repair originates from
+# tonyd2wild's recipe via knapcio/GLM-5.3-Flash-4x-DGX-Spark-TP4 @ dddb034
+# (see overlay/PROVENANCE.md); sha256 equals that repo's manifest
+# accepted_sha256 and published_sha256. QUAD_PREFIX_REPAIR=off = stock engine
+# (no mount, no explicit prefix-cache flags) for a one-line A/B rollback.
+OVERLAY_DIR="$REPO_ROOT/overlay"
+COORDINATOR="$OVERLAY_DIR/kv_cache_coordinator.py"
+EXPECTED_COORDINATOR_SHA256=d6410dfd4cb7174620787573d5695706965fea7b462961e7671c9d6c3fe5c9e7
+QUAD_PREFIX_REPAIR="${QUAD_PREFIX_REPAIR:-off}"   # bisect 2026-09-26: prefix set OFF (see receipt)
 
 # RoCE HCAs: cross rail then pair rail. dc90's edge-A end is the P2 cage.
 case "$(hostname)" in
@@ -116,7 +133,13 @@ printf '%s  %s\n' \
   '0c4099f3382d6c92700dfb99725025360966fd73032f0ecf32377c0d9e6309c5' \
   "$CHAT_TEMPLATE" | sha256sum --check --status - \
   || die "official GLM chat template does not match the pinned revision"
-printf '  model, drafter, NCCL, fabric, and GPU state: clean\n'
+if [ "$QUAD_PREFIX_REPAIR" = on ]; then
+  test -f "$COORDINATOR" || die "missing $COORDINATOR (stage quad-launcher/overlay)"
+  printf '%s  %s\n' "$EXPECTED_COORDINATOR_SHA256" "$COORDINATOR" \
+    | sha256sum --check --status - \
+    || die "kv_cache_coordinator repair does not match the pinned revision"
+fi
+printf '  model, drafter, NCCL, prefix-repair(%s), fabric, and GPU state: clean\n' "$QUAD_PREFIX_REPAIR"
 docker rm -f "$NAME" 2>/dev/null || true
 
 if [ "$R" = "0" ]; then
@@ -140,6 +163,14 @@ if [ "${QUAD_E27C_SCHEDULER:-off}" = "on" ]; then
   SCHED_ARGS=(--async-scheduling --prefill-schedule-interval 8)
 fi
 
+# Phase 1: prefix caching + the DFlash2 prefix-cache repair (knapcio @ dddb034).
+PREFIX_MOUNT=()
+PREFIX_ARGS=()
+if [ "$QUAD_PREFIX_REPAIR" = on ]; then
+  PREFIX_MOUNT=(-v "$COORDINATOR:/usr/local/lib/python3.12/dist-packages/vllm/v1/core/kv_cache_coordinator.py:ro")
+  PREFIX_ARGS=(--enable-prefix-caching --enable-chunked-prefill)
+fi
+
 docker run -d --name "$NAME" --restart no \
   --cap-add IPC_LOCK --ulimit memlock=-1:-1 \
   --network host --ipc host --shm-size 32g --gpus all \
@@ -151,6 +182,7 @@ docker run -d --name "$NAME" --restart no \
   -v "$CACHE_DIR/root-cache:/root/.cache" \
   -v "$CHAT_TEMPLATE:/opt/glm53/chat_template.jinja:ro" \
   "${SCHED_MOUNT[@]}" \
+  "${PREFIX_MOUNT[@]}" \
   -e LD_PRELOAD=/opt/patched-nccl/libnccl.so.2 -e VLLM_NCCL_SO_PATH=/opt/patched-nccl/libnccl.so.2 \
   -e NCCL_SKIP_TREE_CONNECT=1 -e NCCL_SWITCHLESS_RING_ONLY=1 \
   -e NCCL_SOCKET_IFNAME="$MGMT_IF" -e GLOO_SOCKET_IFNAME="$MGMT_IF" -e VLLM_HOST_IP="$MIP" \
@@ -160,6 +192,8 @@ docker run -d --name "$NAME" --restart no \
   -e NCCL_ALGO=Ring -e NCCL_PROTO=LL,LL128,Simple -e NCCL_P2P_LEVEL=SYS \
   -e NCCL_MIN_NCHANNELS=4 -e NCCL_MAX_NCHANNELS=4 -e NCCL_CROSS_NIC=1 -e NCCL_CUMEM_ENABLE=0 \
   -e NCCL_IGNORE_CPU_AFFINITY=1 -e NCCL_DEBUG="$NCCL_DEBUG" -e NCCL_DEBUG_SUBSYS="$NCCL_DEBUG_SUBSYS" \
+  -e TORCH_USE_RTLD_GLOBAL=1 -e TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
+  -e NCCL_IB_ROCE_VERSION_NUM=2 -e NCCL_IB_ADDR_RANGE=10.10.0.0/22 \
   -e VLLM_ONE_GPU_PER_NODE=1 -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   "${SCHED_ENV[@]}" \
   -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e PYTHONUNBUFFERED=1 \
@@ -174,8 +208,11 @@ docker run -d --name "$NAME" --restart no \
     --gpu-memory-utilization 0.85 --max-model-len 262144 \
     --max-num-seqs 6 --block-size 2304 --moe-backend marlin \
     "${SCHED_ARGS[@]}" \
-    --limit-mm-per-prompt '{"image":16}' \
-    --kv-cache-dtype fp8_e4m3 --kv-cache-memory 12884901888 \
+    "${PREFIX_ARGS[@]}" \
+    --skip-mm-profiling --mm-processor-cache-gb 4 \
+    --mm-processor-kwargs '{"max_pixels":6422528,"max_image_tokens":4096}' \
+    --limit-mm-per-prompt '{"image":16,"video":0}' \
+    --kv-cache-dtype fp8_e4m3 --kv-cache-memory 25769803776 \
     --speculative-config '{"method":"dflash","model":"/draft","num_speculative_tokens":7}' \
     --tool-call-parser glm47 --enable-auto-tool-choice --reasoning-parser glm45 \
     --chat-template /opt/glm53/chat_template.jinja \

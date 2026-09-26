@@ -65,13 +65,35 @@ Rollback (per user instruction to pause once serving worked):
   `mem-free-quad` + full `quad-*` lane retained.
 - Commits: `980343e` (wiring), `e82b06c` (rollback + reassessment receipt).
 
-## Current serving conditions (solidified)
+## 2026-09-26 15:00-16:00 — Phase 1 launcher-only batch DEPLOYED (GATE GREEN)
+Executed `QUAD-UPGRADE-PLAN.md` §Phase 1 after committing the analyses (9f2902f):
+- Applied: KV pin 12 → **24 GiB/rank** (pool **1,576,246 → 3,154,184 tokens**, 12.03x @262k);
+  4 NCCL/lifecycle env vars (`TORCH_USE_RTLD_GLOBAL`, `TORCH_NCCL_ASYNC_ERROR_HANDLING`,
+  `NCCL_IB_ROCE_VERSION_NUM=2`, `NCCL_IB_ADDR_RANGE=10.10.0.0/22`); mm hygiene
+  (`--skip-mm-profiling`, 4 GiB mm processor cache, `image:16`/`video:0`, max_pixels/max_image_tokens).
+- Prefix caching + knapcio `kv_cache_coordinator` mount: **NOT adopted** — boot attempt 1 hung all
+  four ranks after communicator init, before weight loading (mamba cache flipped to 'align'); bisect
+  (Attempt A) proved the prefix set is the cause. Toggle `QUAD_PREFIX_REPAIR` defaulted **off**;
+  overlay vendored + sha-pinned for the Phase 3 retry with the kpool/indexer fix pack.
+- Bonus finding: **v11 caches prefixes by default** — 21.6k-token repeat TTFT 2.196 s vs a genuine
+  cold 18.165 s = 8.27x, with no flag.
+- Verified: health 200, `/v1/models` 262144, gate 4/4 (needle `INDIGO-OTTER-4417` @28,780; glm47
+  tool call; warm decode 47.6 t/s), containers Up 4/4, `MemAvailable` 35-37G per node.
+- Receipt: `receipts/2026-09-26-phase1-launcher-batch.md`; probe harness `probe-quad.py` +
+  `receipts/probe-{before,after-phase1a}-20260926.json` (throughput = receipt, not rollback gate).
+- Open: gate warm decode 47.6 t/s is below the historical 70-76 band with no probe-side regression —
+  check in Phase 2. `deep_ep` import failure is pre-existing (verified with a throwaway container).
+
+## Current serving conditions (solidified; Phase 1 applied 2026-09-26)
 - Endpoint: http://192.168.1.6:8888 — `glm-5.3-flash`, HTTP 200.
 - Config: NVFP4 nvidia weights, TP=4, `--max-model-len 262144`,
-  `--max-num-seqs 6`, fp8_e4m3 KV pinned 12 GiB/rank, DFlash2 k=7,
-  `QUAD_E27C_SCHEDULER=off`.
-- KV pool 1,576,246 tokens = 6.01× @262k / 4× @393k.
+  `--max-num-seqs 6`, fp8_e4m3 KV pinned **24 GiB/rank**, DFlash2 k=7,
+  `QUAD_E27C_SCHEDULER=off`, `QUAD_PREFIX_REPAIR=off` (see Phase 1 note above),
+  `--skip-mm-profiling` + 4 GiB mm processor cache, `image:16`/`video:0`.
+- KV pool **3,154,184 tokens** = 12.03× @262k (was 1,576,246 = 6.01×).
 - Gate: needle + tool-call + decode 4/4 PASS; `just quad-test` OK.
+- Probes: `quad-launcher/probe-quad.py` (decode / prefix / prefill / concurrency) — receipts in
+  `quad-launcher/receipts/probe-*.json`.
 - Ops: `just quad-up|quad-down|quad-status|quad-logs|quad-log N|quad-test|`
   `quad-verify|mem-free-quad`.
 

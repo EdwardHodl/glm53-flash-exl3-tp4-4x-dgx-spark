@@ -1,0 +1,40 @@
+{
+ "label": "after-phase1-attemptA",
+ "base": "http://192.168.1.6:8888",
+ "model": "glm-5.3-flash",
+ "cells": [
+  {
+   "cell": "decode",
+   "streams": 1,
+   "run1_ttft_s": 0.348,
+   "run1_completion_tokens": 192,
+   "run1_decode_tokens_per_s": 19.94,
+   "run1_total_s": 9.93,
+   "prompt_tokens": 31,
+   "run2_ttft_s": 0.443,
+   "run2_completion_tokens": 207,
+   "run2_decode_tokens_per_s": 25.72,
+   "run2_total_s": 8.45
+  },
+  {
+   "cell": "prefix",
+   "prompt_tokens": 21606,
+   "ttft_cold_s": 18.165,
+   "ttft_repeat_s": 2.196,
+   "speedup": 8.27
+  },
+  {
+   "cell": "prefill",
+   "prompt_tokens": 17319,
+   "ttft_s": 10.159,
+   "prompt_tokens_per_s": 1704.7
+  },
+  {
+   "cell": "conc6",
+   "streams": 6,
+   "mean_stream_tokens_per_s": 18.03,
+   "aggregate_tokens_per_s": 69.97,
+   "wall_s": 21.95
+  }
+ ]
+}
