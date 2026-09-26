@@ -1,6 +1,7 @@
 # QUAD-UPGRADE-PLAN — unified adoption plan for the fire TP=4 GLM-5.3-Flash lane
 
-Written 2026-09-26. Status: **plan — nothing executed.** This document supersedes,
+Written 2026-09-26. Status: **in execution — Phase 1 DONE (deployed, serving verified,
+commit `b8b8a84`); Phases 2–3 next, effort in §5.** This document supersedes,
 for execution purposes, the three input analyses, which remain on file as evidence:
 
 - `QUAD-ALEXELLIS-PROPOSAL.md` — the deployed baseline proposal (commit `c6d7f86`, GATE GREEN).
@@ -24,6 +25,37 @@ seqs 8 first, RigMark as the gate all stand. Four items were added or strengthen
 the consolidated knapcio analysis: the prefix-cache repair (§Phase 1 item 3), the
 FlashInfer workspace cache (§Phase 3 item 9g), a quality gate for the ulp-level overlays
 (§Phase 3 item 9h), and the mm-budget decision (§Phase 1 item 4).
+
+## 0.5 Progress — Phase 1 executed (measured, 2026-09-26 evening)
+
+Executed after committing the three analyses (`9f2902f`); the deployed state is committed as
+**`b8b8a84`**, working tree clean. Serving was verified **before** the commit: `/health` 200,
+`/v1/models` `glm-5.3-flash` `max_model_len 262144`, generation returns `PHASE1 LIVE`
+(finish `stop`), gate **4/4 GREEN** (needle `INDIGO-OTTER-4417` @28,780 tok, glm47 tool call,
+warm decode 47.6 t/s), `glm53_tp4` Up on all four ranks.
+
+| Step | Result |
+|---|---|
+| 1. KV 12→24 GiB/rank | **APPLIED.** Pool **1,576,246 → 3,154,184 tokens** = 12.03× @262k. `MemAvailable` after startup: e116 35G, dc90 36G, 3ff5 37G, 2ca4 35G (floor 16 GiB: PASS). |
+| 2. NCCL/lifecycle env (4 vars) | **APPLIED** verbatim. |
+| 3. prefix caching + repair mount | **NOT ADOPTED — hangs engine init.** Attempt 1 (flags + mount) stalled **all four ranks** after communicator init, before weight loading: the log flips mamba cache to `align` (`Mamba cache mode is set to 'align' … when prefix caching is enabled`), EngineCore prints the V1 config at 22:14:56 then silence, workers finish NCCL/PYNCCL init at 22:15:12 then silence; GPUs 0 %, worker main thread state `R`, disk IO idle (~88 KB/10 s), no traceback. In-container import of the mount and of its dependencies succeeds, and the mount is in place (39,786 bytes). **Bisect Attempt A** (prefix set off; KV/env/mm on) booted green → the prefix set is the cause, not KV/env/mm. `QUAD_PREFIX_REPAIR` now defaults **off**; the file stays vendored and sha-pinned (`d6410dfd…`). Retry is re-scheduled after **item 9e** (the kpool/hybrid-tail fix pack is the companion this hang is missing). |
+| 4. mm hygiene | **APPLIED** — `--skip-mm-profiling`, `--mm-processor-cache-gb 4`, `--mm-processor-kwargs {max_pixels 6422528, max_image_tokens 4096}`, `image:16`/`video:0`. |
+| 5. baseline window | **PARTLY.** RigMark client not installed yet; a local stdlib harness (`quad-launcher/probe-quad.py`) took the before/after column: prose decode 21.21/24.93 → 19.94/25.72 t/s, 17.3k-token prefill 10.335 → 10.159 s, 6-stream mean 16.79 → 18.03 t/s. RigMark remains for the Phase 2 baseline column. |
+
+**Unplanned finding worth keeping (measured).** This image caches prefixes **by default** — no flag
+required. A genuine cold 21.6k-token prompt costs **18.165 s**; the identical repeat costs
+**2.196 s** = **8.27×**. (The earlier "before" row read 1.00× because an earlier probe run had already
+cached that exact text.) This is the largest measured win of the session for our cron/Hindsight
+traffic, and it is already live.
+
+**Open — recorded, not acted on** (rollback policy applied: throughput is a receipt, not a rollback
+gate; no revert for a benchmark delta):
+- gate warm decode 47.6 t/s sits below the historical 70–76 band while the probe shows no regression
+  on the same cells — likely prompt/acceptance variance and warm state; check in Phase 2.
+- `deep_ep` fails to import in this image **pre-existing** (verified with a throwaway container of the
+  same image, with and without `TORCH_USE_RTLD_GLOBAL=1`), logged by vLLM as a WARNING; gate unaffected.
+
+Receipt: `quad-launcher/receipts/2026-09-26-phase1-launcher-batch.md`.
 
 ## 0. Ground truth established by the three analyses
 
@@ -65,9 +97,11 @@ Every phase: one boot, receipt written to `quad-launcher/receipts/`, RigMark
 window (medians of 2) + needle + tool-call gate before promotion. All launcher
 changes are edits to `quad-launcher/rank-launcher.sh` + `cluster.env`
 (sha-pinned) — no image change until Phase 4. Rollback per phase = revert the
-edits + one boot. Estimated cost per boot ~10–30 min (warm JIT caches) + gate.
+edits + one boot. Cost per boot: measured 2026-09-26 cold boot = 13 min to
+API-ready (33 shards, 15–17 s/shard) + ~2 min gate; warm boots ~8–10 min with
+the JIT caches persisted.
 
-### Phase 1 — launcher-only batch (one boot, ~1.5 h total)
+### Phase 1 — launcher-only batch — **DONE 2026-09-26** (`b8b8a84`, gate green; §0.5)
 
 1. **KV pin 12 → 24 GiB/rank**: `--kv-cache-memory 25769803776`.
    Expected pool ~3.1M tokens (~12× @262k) vs today's 1,576,246.
@@ -89,6 +123,8 @@ edits + one boot. Estimated cost per boot ~10–30 min (warm JIT caches) + gate.
    are asserted for explicitness and the mount is the actual repair.
    sha-pin the mounted file from knapcio's `docs/runtime-source-manifest.json`
    (`accepted_sha256`) in `cluster.env`, next to the existing three pins.
+   **Executed 2026-09-26: HUNG — see §0.5 step 3.** Root cause is the align-mode
+   hybrid/tail path that item 9e repairs; the retry is re-scheduled to follow 9e.
 4. **Context budget hygiene — pick one, deliberately**: either RiNGSiDE's
    `--skip-mm-profiling` + `--limit-mm-per-prompt {"image":4,"video":1}`, or
    knapcio's keep-`image:16` + `--mm-processor-cache-gb 4`
@@ -110,7 +146,7 @@ run** (the prefix-cache repair changes the KV/prefix path, so a correctness chec
 belongs in Phase 1 even though no numerics knob moved). Promote only if
 TTFT/aggregate improve or hold, qeval ≥72/75, and the gate stays green.
 
-### Phase 2 — boot-shape experiments (one boot each, promote/revert per boot)
+### Phase 2 — boot-shape experiments — **NEXT** (one boot each, ~3.5–4 h total, §5)
 
 6. **`--load-format instanttensor` + `INSTANTTENSOR_BACKEND=URING`** — cut the
    ~30 min shard load. Cheap to try, revert in one line if unsupported in
@@ -121,7 +157,7 @@ TTFT/aggregate improve or hold, qeval ≥72/75, and the gate stays green.
    estimated ceiling 4 concurrent 524K requests). This changes the Hindsight
    repoint arithmetic (that model runs 600K ctx) — note it in the ops doc if promoted.
 
-### Phase 3 — admission and knapcio overlays (our image, mountable)
+### Phase 3 — admission and knapcio overlays (our image, mountable) — ~2 working days (§5)
 
 8. **`--max-num-seqs 6 → 8`.** Then, as a separate boot, 16 with
    `--compilation-config {"mode":3,"cudagraph_capture_sizes":[8,…,128],"compile_sizes":[8]}`
@@ -223,8 +259,53 @@ TTFT/aggregate improve or hold, qeval ≥72/75, and the gate stays green.
 - Nothing here touches a node until you say go. Phases 1–3 are launcher edits
   with per-boot receipts; Phase 4 is a decision document with a day-scale budget.
 
-## 4. First action
+## 4. Next action
 
-Phase 1, step 1–5 as one batch: four launcher edits + RigMark client install,
-one boot, full gate, receipt. Tell me to start and I will execute Phase 1 end
-to end (~1.5–2 h including the two boots of margin).
+Phase 2, item 6 (`--load-format instanttensor` + `INSTANTTENSOR_BACKEND=URING`, one boot,
+revert in one line if sm121-v11-dflash2 does not support the loader), then item 7 (512K).
+Say go and I execute Phase 2 end to end (~3.5–4 h including the revert boot of margin).
+The prefix-repair retry (Phase 1 item 3) is re-scheduled to follow Phase 3 item 9e — that
+pack repairs the align-mode hybrid/tail path the hang lives in.
+
+## 5. Effort — the next two phases
+
+Boot costs are **measured** this session: cold boot to API-ready 13 min + ~2 min gate for 33
+shards (15–17 s/shard, graph capture 33 s / 1.90 GiB); warm boots ~8–10 min with the JIT caches
+persisted. Everything below is an **estimate** (wall clock, one operator), not a measurement.
+
+### Phase 2 — boot-shape experiments: ~3.5–4 h (high confidence)
+
+| Item | Boots | Wall clock | Risk / revert |
+|---|---|---|---|
+| 6. `instanttensor` + URING load | 1 (+1 revert) | 1.5–2 h (45 min if unsupported) — flag-support probe, launcher edit, one boot, gate + receipt | Moderate: the loader may be absent in sm121-v11-dflash2, or UMA spikes while loading 191 GiB from disk. Revert = one line + one boot. |
+| 7. 512K context (`--max-model-len 524288`, keep 24 GiB) | 1 | 1.5–2 h — boot, then the concurrency ladder 1→2→4 with long-context needles. One 512K prefill is ~4–5 min at our measured ~1.7k tok/s, so the ladder alone is 30–45 min | Low–moderate: memory is comfortable (12.03× @262k ⇒ ~6× @512K), but this is **client-visible** (`max_model_len` in `/v1/models`) and changes the Hindsight repoint arithmetic. |
+
+### Phase 3 — admission + knapcio overlays: ~2 working days (12–16 h, low–moderate confidence)
+
+| Group | Boots | Wall clock | Notes |
+|---|---|---|---|
+| 8. seqs 6 → 8 | 1 | ~1 h | Do this first — cheapest capacity lever, and our own EXL3 receipt already measured the shape (135 vs 84 tok/s aggregate at seqs 8). |
+| 8b. seqs 16 + `compilation-config mode 3` | 1 (+1 revert) | 1–1.5 h | Only after confirming mode 3 exists in v11; past-default capture sizes without graphs cost more than they gain. Watch graph memory against UMA. |
+| 9a. adaptive draft (`LeversScheduler`) | 1 | 1–1.5 h | Their c4 prose aggregate 152.9 (median of 3). |
+| 9b / 9c / 9d. KDA stash, vocab-parallel argmax, projection splitting | 1 each | **~2 h each** | These move numerics: throughput gate **plus** `qeval.py` (≥72/75 at c1 and c4) + `kld_probe.py`/`compare_kld_strict.py`. Budget the quality pass as roughly half the time. |
+| 9e. kpool/indexer fix pack | 1 | 1.5–2 h | **Re-entry point.** After it lands, retry the Phase-1 prefix-repair mount (~1 h) — it is the companion the hang is missing. |
+| 9f. L2 prefetch | 1 | ~1 h | Small and cleanly measured (+0.61 ms/step at c1, A/A-validated). |
+| 9g / 9h. fast-load + warmup, quality-gate wiring | 1–2 | 1.5–2 h | `-e FLASHINFER_WORKSPACE_BASE=/cache/fi` is the actual lever (FlashInfer ignores `XDG_CACHE_HOME`; three modules rebuild per boot: top-k ~92 s, batch MLA ~7 s, sampling ~38 s); `GLM_FAST_LOAD=1` removes a further ~230–280 s of file-backed mmap copies on the head. Target: warm boots → ~129 s, making every later promotion cheap. |
+
+Order a→h, gate between each; a failed mount reverts by unsetting one flag. Realistic shape:
+10–12 boots. Expect one or two groups to fail (the same class as the Phase-1 prefix-set hang),
+each costing one extra revert boot (~45 min). If 9e restores prefix caching, add the retry boot
+— and re-run `qeval`, since that path carries cached KV.
+
+## 6. Standing operational facts (for any executor of Phases 2–3)
+
+- Live now: `http://192.168.1.6:8888`, `glm-5.3-flash`, KV pool **3,154,184 tokens**
+  (12.03× @262k), `MemAvailable` 35–37 G per node at idle, `glm53_tp4` Up on all four ranks.
+- Two toggles govern optional work: `QUAD_PREFIX_REPAIR` (**off** — leave off until 9e),
+  `QUAD_E27C_SCHEDULER` (off). Launcher + env are sha-pinned (`cluster.env`
+  `EXPECTED_LAUNCHER_SHA256 246e06e2…`) and staged identically on all four ranks.
+- After every boot, run the gate set: `just quad-status` (containers), `just quad-test`
+  (health + generation), `just quad-verify` (ring), needle + tool-call + decode, per-node
+  `MemAvailable ≥ 16 GiB`, and the KV pool line in the rank-0 log.
+- Throughput is a receipt, not a rollback gate (Edward, 2026-09-26): roll forward unless the
+  service is unservable and unfixable.
