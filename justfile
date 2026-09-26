@@ -196,3 +196,74 @@ tp4-logs WHICH="":
 
 tp4-logs-raw WHICH="":
     ssh -t spark@spark-e116.local 'cd /home/spark/glm53-tp3 && ./start-tp4.sh logs {{WHICH}}'
+
+# ── QUAD lane: NVFP4 nvidia weights + alexellis switchless recipe (4 ranks) ──
+# nvidia/GLM-5.3-Flash-NVFP4, image sm121-v11-dflash2, API glm-5.3-flash :8888
+# on spark-e116. Scripts: quad-launcher/ (site config, rank launcher, fabric
+# verify). Ring + gates per QUAD-ALEXELLIS-PROPOSAL.md; port 8888 keeps fire
+# crons working. Old EXL3 tp4-* lane above is retired but kept for reference.
+
+QUAD_CFG := "quad-launcher/cluster.env"
+QUAD_RECIPE := "/home/flowai/Workspaces/devops/recipes/glm53flash/glm-5.3-flash-4x-dgx-spark-switchless"
+
+# Verify the switchless ring: GID index 3 RoCE-v2, MTU 9000, jumbo pings.
+quad-verify:
+    bash quad-launcher/verify-fabric.sh
+
+# Bring up the quad (workers 3->2->1 headless, then head 0; preflights + gate).
+# Runs the recipe's cluster-up.sh with our site config. Takes ~15-20 min.
+quad-up:
+    just mem-free-quad
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd {{QUAD_RECIPE}}
+    GLM53_CLUSTER_CONFIG="{{justfile_directory()}}/{{QUAD_CFG}}" bash scripts/cluster-up.sh
+
+# Remove the quad containers on all 4 ranks.
+quad-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd {{QUAD_RECIPE}}
+    GLM53_CLUSTER_CONFIG="{{justfile_directory()}}/{{QUAD_CFG}}" bash scripts/cluster-down.sh
+
+# Read-only quad status (containers, GPU, API).
+quad-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd {{QUAD_RECIPE}}
+    GLM53_CLUSTER_CONFIG="{{justfile_directory()}}/{{QUAD_CFG}}" bash scripts/cluster-status.sh
+
+# Follow one rank's container log. Usage: just quad-log 0|1|2|3
+quad-log RANK="0":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case {{RANK}} in
+      0) h=spark-e116.local; k="" ;;
+      1) h=gx10-dc90.local; k="-i /home/flowai/.ssh/spark_agent_key" ;;
+      2) h=spark-3ff5.local; k="-i /home/flowai/.ssh/spark_agent_key" ;;
+      3) h=gx10-2ca4.local; k="" ;;
+      *) echo "rank must be 0-3"; exit 2 ;;
+    esac
+    exec ssh $k -o BatchMode=yes spark@$h "docker logs -f glm53_tp4"
+
+# Resume the HF download of nvidia/GLM-5.3-Flash-NVFP4 on the head (e116).
+quad-download:
+    ssh spark@spark-e116.local 'setsid nohup ~/.local/bin/hf download nvidia/GLM-5.3-Flash-NVFP4 > ~/logs/hf-nvidia-glm53-cache.log 2>&1 < /dev/null & echo "download resumed (cache layout)"'
+
+# Fan weights out from the head to the 3 workers over the ring (190 GiB each).
+quad-fanout:
+    ssh spark@spark-e116.local 'setsid nohup ~/fire-quad/scripts/fanout-weights.sh > ~/logs/fanout-weights.log 2>&1 < /dev/null & echo "fanout started; tail ~/logs/fanout-weights.log on e116"'
+
+# One-shot API health + short generation on the quad endpoint.
+quad-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    base="http://spark-e116.local:8888"
+    curl -s -o /dev/null -w 'health => HTTP %{http_code}\n' -m 5 "$base/health" || true
+    curl -s -m 120 "$base/v1/chat/completions" -H "Content-Type: application/json" -d '{
+      "model": "glm-5.3-flash",
+      "messages": [{"role":"user","content":"Reply exactly: QUAD NVFP4 LIVE TP4"}],
+      "max_tokens": 16,
+      "temperature": 0,
+      "chat_template_kwargs": {"reasoning_effort": "low"}
+    }' | python3 -m json.tool || true
