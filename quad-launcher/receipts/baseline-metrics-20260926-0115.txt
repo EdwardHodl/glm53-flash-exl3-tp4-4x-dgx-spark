@@ -1,0 +1,6 @@
+vllm:spec_decode_num_draft_tokens_total{engine="0",model_name="glm-5.3-flash"} 361017.0
+vllm:spec_decode_num_accepted_tokens_total{engine="0",model_name="glm-5.3-flash"} 127043.0
+vllm:num_requests_running{engine="0",model_name="glm-5.3-flash"} 2.0
+vllm:num_requests_waiting{engine="0",model_name="glm-5.3-flash"} 0.0
+vllm:num_requests_waiting_by_reason{engine="0",model_name="glm-5.3-flash",reason="capacity"} 0.0
+vllm:num_requests_waiting_by_reason{engine="0",model_name="glm-5.3-flash",reason="deferred"} 0.0

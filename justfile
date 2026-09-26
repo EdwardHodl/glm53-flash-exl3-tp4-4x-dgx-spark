@@ -99,64 +99,7 @@ test-glm-exl3 +HOST="spark-e116.local":
     echo "=== Test 4: TP3 container view ==="
     ssh spark@spark-e116.local 'docker ps --filter name=glm53-exl3-tp3 --format "$(printf "\173\173.Names\175\175 \173\173.Status\175\175")"'
 
-# ── TP=3 lane: upstream start-tp3.sh on the head (the supported TP3 path) ──
-# TP=3 is NOT a flags-only change: 64 attention/KV heads pad to 66 (local 22),
-# vocab 154880 -> 154944 (lcm 64,3), shared-expert 2048 -> 2112, and routed
-# moe_intermediate_size=2048 is NOT padded — expert parallel (288/3 = 96 whole
-# experts per rank) is the supported route. Drafter cannot shard by 3, so
-# DFLASH_DRAFT_TP=1. Upstream launcher owns the patch layer:
-#   overlay/tp3/patch_tp3_glm.py   rewrites the image's glm5next/nvidia/model.py
-#   overlay/tp3/vllm/*             bind-mounted over vLLM internals
-# Recipe tree + env are staged at /home/spark/glm53-tp3 on spark-e116.
-tp3-status:
-    ssh spark@spark-e116.local 'cd /home/spark/glm53-tp3 && ./start-tp3.sh status'
-
-tp3-start:
-    ssh spark@spark-e116.local 'cd /home/spark/glm53-tp3 && ./start-tp3.sh'
-
-tp3-stop:
-    ssh spark@spark-e116.local 'cd /home/spark/glm53-tp3 && ./start-tp3.sh stop'
-
-# Follow TP3 logs. Usage:
-#   just tp3-logs            frozen-banner console: health/host banner on top +
-#                            3-column live tails of head/w1/w2 startup logs
-#   just tp3-logs head|w1|w2 single host, banner kept (docker logs -f)
-#   just tp3-logs-raw [n]    upstream launcher's own log view (no banner)
-tp3-logs WHICH="":
-    ./glm/scripts/tp3-tri-view.sh {{WHICH}}
-
-tp3-logs-raw WHICH="":
-    ssh -t spark@spark-e116.local 'cd /home/spark/glm53-tp3 && ./start-tp3.sh logs {{WHICH}}'
-
-# Free page cache on all 3 nodes. REQUIRED before a TP3 start: the ~164 GiB
-# staging rsync fills the page cache, and on GB10 unified memory that shows up
-# as "Free memory on device cuda:0" — rank 2 failed the 0.80 gate at 76 GiB
-# free until caches were dropped (43 G used / 89 G cache -> 115 G free).
-mem-free:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    for h in spark-e116.local gx10-2ca4.local; do
-      ssh -o BatchMode=yes spark@$h 'free -g | awk "/Mem:/{print \"  '"$h"' avail=\"\$7\"G\"}"; sudo sh -c "sync; echo 3 > /proc/sys/vm/drop_caches"'
-    done
-    ssh -i /home/flowai/.ssh/spark_agent_key -o BatchMode=yes spark@spark-3ff5.local \
-      'free -g | awk "/Mem:/{print \"  spark-3ff5 avail=\"\$7\"G\"}"; sudo sh -c "sync; echo 3 > /proc/sys/vm/drop_caches"'
-
-# Stage the TP3-prepared drafter (glm53-tp3-draft/<rev>) on BOTH workers.
-# start-tp3.sh's prepare_tp3_draft only runs on the head, but every rank parses
-# the speculative config in the mp executor, so workers without it die with
-# "Invalid repository ID or local directory ... config.json". Run after any
-# drafter revision change, before tp3-start.
-tp3-drafter-sync:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    ssh -o BatchMode=yes spark@spark-e116.local 'set -e
-      for ip in 10.10.0.2 10.10.1.3; do
-        ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new spark@$ip "mkdir -p /home/spark/.cache/huggingface/glm53-tp3-draft"
-        rsync -a --info=progress2 -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
-          /home/spark/.cache/huggingface/glm53-tp3-draft/ spark@$ip:/home/spark/.cache/huggingface/glm53-tp3-draft/
-      done
-      echo "drafter staged on both workers"'
-
+# ── mem-free ritual for the quad (GB10 page-cache drop before boots) ──
 # ── TP=4 quad lane (ring: e116 r0 head -> dc90 r1 -> 3ff5 r2 -> 2ca4 r3) ─────
 
 # Free page cache on all 4 nodes. REQUIRED before a TP4 start (GB10 unified
@@ -172,36 +115,12 @@ mem-free-quad:
         'free -g | awk "/Mem:/{print \"  '\"$h\"' avail=\"\$7\"G\"}"; sudo sh -c "sync; echo 3 > /proc/sys/vm/drop_caches"'
     done
 
-# TP4 status (upstream launcher status on the head)
-tp4-status:
-    ssh spark@spark-e116.local 'cd /home/spark/glm53-tp3 && ./start-tp4.sh status'
-
-# TP4 bring-up: mem-free-quad then upstream start-tp4.sh (workers 3->2->1 then
-# head 0, health wait + smoke). First run needs the mem-free ritual and a
-# ~17-20 min boot. Stop TP3 first: port 8888 collides.
-tp4-start:
-    just mem-free-quad
-    ssh spark@spark-e116.local 'cd /home/spark/glm53-tp3 && ./start-tp4.sh'
-
-tp4-stop:
-    ssh spark@spark-e116.local 'cd /home/spark/glm53-tp3 && ./start-tp4.sh stop'
-
-# Quad log view: frozen banner (API health + per-rank container/mem/load) on
-# top + 4-column live tails of head/w1/w2/w3 container logs.
-#   just tp4-logs            live quad view
-#   just tp4-logs head|w1|w2|w3   follow one host's container log
-#   just tp4-logs-raw        upstream launcher's own log view
-tp4-logs WHICH="":
-    ./glm/scripts/tp4-quad-view.sh {{WHICH}}
-
-tp4-logs-raw WHICH="":
-    ssh -t spark@spark-e116.local 'cd /home/spark/glm53-tp3 && ./start-tp4.sh logs {{WHICH}}'
 
 # ── QUAD lane: NVFP4 nvidia weights + alexellis switchless recipe (4 ranks) ──
 # nvidia/GLM-5.3-Flash-NVFP4, image sm121-v11-dflash2, API glm-5.3-flash :8888
 # on spark-e116. Scripts: quad-launcher/ (site config, rank launcher, fabric
 # verify). Ring + gates per QUAD-ALEXELLIS-PROPOSAL.md; port 8888 keeps fire
-# crons working. Old EXL3 tp4-* lane above is retired but kept for reference.
+# crons working. TP=3/TP=4 EXL3 lanes removed 2026-09-26 (quad is the only lane).
 
 QUAD_CFG := "quad-launcher/cluster.env"
 QUAD_RECIPE := "/home/flowai/Workspaces/devops/recipes/glm53flash/glm-5.3-flash-4x-dgx-spark-switchless"
