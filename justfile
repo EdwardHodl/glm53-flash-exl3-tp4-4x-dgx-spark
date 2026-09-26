@@ -246,6 +246,15 @@ quad-log RANK="0":
     esac
     exec ssh $k -o BatchMode=yes spark@$h "docker logs -f glm53_tp4"
 
+# Quad console: frozen status banner (API health + per-rank container/mem/load)
+# on top + 4-column live tails of the glm53_tp4 logs on all 4 ring hosts.
+#   just quad-logs             live quad view
+#   just quad-logs 0|1|2|3     follow one host's log (banner kept)
+#   just quad-logs -- --once   single snapshot frame, no loop
+quad-logs *ARGS="":
+    #!/usr/bin/env bash
+    exec ./quad-launcher/quad-view.sh {{ARGS}}
+
 # Resume the HF download of nvidia/GLM-5.3-Flash-NVFP4 on the head (e116).
 quad-download:
     ssh spark@spark-e116.local 'setsid nohup ~/.local/bin/hf download nvidia/GLM-5.3-Flash-NVFP4 > ~/logs/hf-nvidia-glm53-cache.log 2>&1 < /dev/null & echo "download resumed (cache layout)"'
