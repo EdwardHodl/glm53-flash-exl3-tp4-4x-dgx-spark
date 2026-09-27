@@ -40,13 +40,15 @@ SM121-capable backend out of `['FLASHINFER_TRTLLM','FLASHINFER_CUTEDSL','FLASHIN
 |---|---|---|
 | Weight load (per rank) | 33 shards @ 16.55 s/shard ≈ **9 min** | **46.06 GiB in 66.1 s** (InstantTensor, 3.2–4.5 GB/s) |
 | Model memory / rank | (not captured this run) | 46.06 GiB |
-| KV cache pool | 1,576,246 tokens = **6.01× @262k** | **3,154,184 tokens = 12.03× @262k** |
+| KV cache pool | 1,576,246 tokens (measured at the **12 GiB** pin) | **3,154,184 tokens (24 GiB pin)** |
 | Time to API-ready | ~13 min (Phase 1 baseline) | **~4 min** |
 | Spec decode | DFlash2 k=7 active | DFlash2 k=7 active, mean acceptance length 2.44–4.40, draft acceptance 21–49% |
 | Compilation | `mode=NONE`, cudagraph `FULL_AND_PIECEWISE`, captures ≤128 | identical |
 
-The 2× KV pool at the *same* 24 GiB pin is a real, unexplained-for-now delta worth a
-second look (LIL loads 4.7 GiB fewer weights per rank; the remainder is unexplained).
+CORRECTED: the apparent "2x KV pool" is **not** a checkpoint effect. The nvidia lane's
+1,576,246-token figure was recorded at its *12 GiB* pin; Phase 1 raised that lane to 24 GiB
+and its own receipt records the identical 3,154,184 tokens. At the same pin both
+checkpoints give the same pool. No unexplained delta remains.
 
 ## 3. Throughput — identical harness, warm, best-of-2, temperature 0
 
@@ -74,7 +76,11 @@ Everything else in this receipt survives the correction, because it is load-inde
 (log facts recorded at boot, not timed throughput):
 
 - weight load 66 s / 46.06 GiB at 3.8 GB/s vs 16.55 s/shard × 33 — **valid**
-- KV pool 3,154,184 vs 1,576,246 tokens at the same 24 GiB pin — **valid** (boot log)
+- KV pool 3,154,184 tokens on the LIL lane — **valid** (boot log) — **but the "2×" comparison is a pin
+  artifact, not a checkpoint effect.** CORRECTED: the 1,576,246 figure belongs to the nvidia lane's
+  *12 GiB* pin boot; Phase 1 raised that lane to 24 GiB and its own receipt records the identical
+  3,154,184 tokens (12.03×). Both checkpoints therefore produce the same KV pool at the same pin.
+  The earlier "same 24 GiB pin" wording in this table was wrong.
 - boot to API-ready ~4 min vs ~13 min — **valid** (wall clock to readiness)
 - corruption probe 0 U+FFFD, needle pass, spec-decode acceptance, MARLIN as the only
   SM121 NVFP4 backend — **valid** (functional/log facts)
