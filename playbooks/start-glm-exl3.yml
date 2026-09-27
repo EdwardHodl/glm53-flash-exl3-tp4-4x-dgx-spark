@@ -2,8 +2,8 @@
 # start-glm-exl3.yml — Deploy GLM-5.3-Flash-EXL3 (TR3-4bpw) across the FIRE
 # triangle: 3x DGX Spark, TP=3.
 #
-# Kit: /home/flowai/Workspaces/devops/fire/ — modeled on the sparks 2-node
-# glm kit (sparks/playbooks/glm), generalized to N=3 nodes.
+# Kit: /home/flowai/Workspaces/devops/fire/ — TP=N playbooks, generalized to N nodes.
+# (Descended from the retired 2-node sparks kit, retired 2026-09-26.)
 #
 # Nodes:
 #   spark-e116.local  rank 0  head    — torch.dist master + OpenAI API :8888

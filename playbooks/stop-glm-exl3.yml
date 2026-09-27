@@ -5,7 +5,7 @@
 # (spark-3ff5). The mp executor uses no Ray, so only the three containers need
 # cleanup. Weights and compile caches are left intact for a fast restart.
 #
-# NOTE: this does NOT touch the old sparks TP=2 stack (glm53-exl3-head/worker).
+# NOTE: this stops only the fire containers.
 #
 # Usage:
 #   ansible-playbook -i playbooks/inventory.yml playbooks/stop-glm-exl3.yml

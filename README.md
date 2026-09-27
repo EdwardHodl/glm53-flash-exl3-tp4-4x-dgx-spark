@@ -1,5 +1,10 @@
 # fire — GLM-5.3-Flash-EXL3 TP=3 on the 3-Spark "fire triangle"
 
+> **STATUS 2026-09-26:** this README documents the TP=3 triangle era. The cluster now
+> runs the **TP=4 quad** (e116/dc90/3ff5/2ca4, alexellis lane, `quad-launcher/`); see
+> `QUAD-ALEXELLIS-PROPOSAL.md`, `TP4-MIGRATION.md` and `quad-launcher/PROGRESS.md`.
+> References below to the `../sparks/` kit are historical — that tree was retired 2026-09-26.
+
 Three DGX Sparks in a triangle (like a fire triangle) serving
 **GLM-5.3-Flash-EXL3 (TR3-4bpw)** with vLLM mp-executor **TP=3**. Modeled on the
 2-node sparks kit (`../sparks/playbooks/glm`); the EXL3 overlay image, runtime
