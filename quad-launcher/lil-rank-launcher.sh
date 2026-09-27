@@ -151,7 +151,7 @@ docker run -d --name "$NAME" --restart no \
     --served-model-name glm-5.3-flash --trust-remote-code \
     --tensor-parallel-size 4 --nnodes 4 --node-rank "$R" \
     --master-addr "$MASTER" --master-port "$MPORT" \
-    --gpu-memory-utilization 0.85 --max-model-len 262144 \
+    --gpu-memory-utilization 0.85 --max-model-len "${LIL_MAX_MODEL_LEN:-262144}" \
     --max-num-seqs "${LIL_MAX_NUM_SEQS:-8}" --block-size 2304 --moe-backend marlin \
     --skip-mm-profiling --mm-processor-cache-gb 4 \
     --mm-processor-kwargs '{"max_pixels":6422528,"max_image_tokens":4096}' \
@@ -164,7 +164,7 @@ docker run -d --name "$NAME" --restart no \
     --distributed-executor-backend mp \
     "${TAIL[@]}"
 
-echo "launched $NAME rank=$R mgmt=$MIP (instanttensor, modelopt_mixed, seqs=${LIL_MAX_NUM_SEQS:-8})"
+echo "launched $NAME rank=$R mgmt=$MIP (instanttensor, modelopt_mixed, seqs=${LIL_MAX_NUM_SEQS:-8}, ctx=${LIL_MAX_MODEL_LEN:-262144})"
 sleep 2
 docker ps --format '{{.Names}} {{.Status}}' | grep "$NAME" \
   || { echo "$NAME exited; run: docker logs $NAME" >&2; exit 1; }

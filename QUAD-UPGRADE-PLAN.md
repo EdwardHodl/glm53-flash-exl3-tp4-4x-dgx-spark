@@ -294,6 +294,15 @@ exactly one lane at a time. Verified on :8888: HTTP 200, exact instructed genera
 0 U+FFFD corruption probe, 4/4 ranks up, weight load 46.06 GiB in 67 s, KV pool 3,154,184
 tokens (12.03× @262k).
 
+**Context raised to 384K (2026-09-27, user request "longer sessions"):**
+`--max-model-len 262144 → 393216`, now overridable as `LIL_MAX_MODEL_LEN` (default 262144).
+384,216 is the exact maximum that keeps all 8 streams: 171 blocks/req × 8 = 1,368 of the
+1,369 blocks in the pool. The ladder is 512K → 6 streams, 1M (native) → 3 streams. Verified
+by a real request of 267,570 prompt tokens (> the old 262,144 cap) with needle retrieval
+intact; receipt `quad-launcher/receipts/2026-09-27-lil-lane-384k-context.md`. Measured KV
+pool at the 384K boot: 3,459,187 tokens (8.80× @384K) — it *grew* from the 262K boot's
+3,154,184 despite the fixed pin, cause not established.
+
 **Added this session — persistent JIT cache fix (Phase 1 item, measured cause):** TileLang
 defaults to `~/.tilelang/cache`, which is *not* inside the mounted `/root/.cache`, so its
 kernels were recompiled on every boot. The log showed 12–14 inline compiles of

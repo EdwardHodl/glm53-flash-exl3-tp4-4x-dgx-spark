@@ -239,12 +239,12 @@ lilquad-up:
       h=$(case $r in 1) echo gx10-dc90.local;; 2) echo spark-3ff5.local;; 3) echo gx10-2ca4.local;; esac)
       echo "== launching LIL rank $r on $h"
       ssh -o BatchMode=yes -i /home/flowai/.ssh/spark_agent_key spark@$h \
-        "NODE_RANK=$r LIL_PORT=8888 LIL_MAX_NUM_SEQS=${LIL_MAX_NUM_SEQS:-8} bash $LIL $r" &
+        "NODE_RANK=$r LIL_PORT=8888 LIL_MAX_NUM_SEQS=${LIL_MAX_NUM_SEQS:-8} LIL_MAX_MODEL_LEN=${LIL_MAX_MODEL_LEN:-262144} bash $LIL $r" &
       sleep 3
     done
     echo "== launching LIL rank 0 on spark-e116.local (head)"
     ssh -o BatchMode=yes spark@spark-e116.local \
-      "NODE_RANK=0 LIL_PORT=8888 LIL_MAX_NUM_SEQS=${LIL_MAX_NUM_SEQS:-8} bash $LIL 0"
+      "NODE_RANK=0 LIL_PORT=8888 LIL_MAX_NUM_SEQS=${LIL_MAX_NUM_SEQS:-8} LIL_MAX_MODEL_LEN=${LIL_MAX_MODEL_LEN:-262144} bash $LIL 0"
     echo "all 4 LIL ranks launched; watch with: just lilquad-log"
 
 # Remove the LIL containers on all 4 ranks.
