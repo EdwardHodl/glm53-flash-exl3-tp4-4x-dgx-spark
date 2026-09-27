@@ -54,7 +54,7 @@ start-glm-exl3 MODE="ib":
     export ANSIBLE_TIMEOUT=2400
     ansible-playbook -i {{inventory}} {{playbooks}}/start-glm-exl3.yml -e fabric_mode={{MODE}}
 
-# Stop the FIRE cluster and release ports (old sparks stack untouched)
+# Stop the FIRE cluster and release ports
 stop-glm-exl3:
     @ansible-playbook -i {{inventory}} {{playbooks}}/stop-glm-exl3.yml
 
@@ -195,3 +195,96 @@ quad-test:
       "temperature": 0,
       "chat_template_kwargs": {"reasoning_effort": "low"}
     }' | python3 -m json.tool || true
+
+# ── LIL lane: local-inference-lab QAD checkpoint + instanttensor (trial lane) ──
+# local-inference-lab/GLM-5.3-Flash-NVFP4 (quantization-aware distilled NVFP4,
+# attention untouched) on the same ring/image family, --load-format instanttensor,
+# modelopt_mixed quant. Provenance: QUAD-UPGRADE-PLAN.md Phase 5 + lil-rank-launcher.sh
+# header. The nvidia lane (quad-*) is untouched; the LIL lane runs in PARALLEL on
+# its own container (glm53_lil_tp4, rendezvous 29521) — STOP the nvidia lane first,
+# both need all four GPUs. Promote = stop quad lane, start lil lane.
+#   just lilquad-stage download|fanout|image|check   (staging phases)
+#   just lilquad-up                                  (boot the LIL trial)
+#   just lilquad-down / -status / -log / -test       (ops)
+
+# Download the LIL checkpoint to the head (resumable; ~186 GiB from HF CDN).
+lilquad-download:
+    bash quad-launcher/lil-stage.sh download
+
+# Fan the checkpoint out from the head to the 3 workers over the ring.
+lilquad-fanout:
+    ssh -o BatchMode=yes spark@spark-e116.local 'bash -s' < quad-launcher/lil-fanout.sh
+
+# Build the derived image glm53-lil:v11-instanttensor on all 4 ranks
+# (base + instanttensor 0.2.0, --no-deps; NCCL wheel stays pinned).
+lilquad-image:
+    bash quad-launcher/lil-stage.sh image
+
+# Verify staging on all 4 ranks (files, quant config, image import, disk).
+lilquad-check:
+    bash quad-launcher/lil-stage.sh check
+
+# Bring the LIL quad up (deploy launcher, workers 3->2->1 headless, then head 0; :8889).
+lilquad-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd {{justfile_directory()}}
+    bash quad-launcher/lil-stage.sh deploy
+    just mem-free-quad
+    LIL=/home/spark/fire-quad/scripts/lil-rank-launcher.sh
+    for r in 3 2 1; do
+      h=$(case $r in 1) echo gx10-dc90.local;; 2) echo spark-3ff5.local;; 3) echo gx10-2ca4.local;; esac)
+      echo "== launching LIL rank $r on $h"
+      ssh -o BatchMode=yes -i /home/flowai/.ssh/spark_agent_key spark@$h \
+        "NODE_RANK=$r LIL_PORT=8889 LIL_MAX_NUM_SEQS=${LIL_MAX_NUM_SEQS:-8} bash $LIL $r" &
+      sleep 3
+    done
+    echo "== launching LIL rank 0 on spark-e116.local (head)"
+    ssh -o BatchMode=yes spark@spark-e116.local \
+      "NODE_RANK=0 LIL_PORT=8889 LIL_MAX_NUM_SEQS=${LIL_MAX_NUM_SEQS:-8} bash $LIL 0"
+    echo "all 4 LIL ranks launched; watch with: just lilquad-log"
+
+# Remove the LIL containers on all 4 ranks.
+lilquad-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for h in spark-e116.local gx10-dc90.local spark-3ff5.local gx10-2ca4.local; do
+      k=""; [[ "$h" == "spark-e116.local" ]] || k="-i /home/flowai/.ssh/spark_agent_key"
+      ssh -o BatchMode=yes $k spark@$h 'docker rm -f glm53_lil_tp4 2>/dev/null || true'
+    done
+    echo "LIL containers removed"
+
+# Read-only LIL status: containers, GPU use, API health.
+lilquad-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for h in spark-e116.local gx10-dc90.local spark-3ff5.local gx10-2ca4.local; do
+      k=""; [[ "$h" == "spark-e116.local" ]] || k="-i /home/flowai/.ssh/spark_agent_key"
+      echo "== $h"
+      ssh -o BatchMode=yes $k spark@$h 'docker ps -a --filter name=glm53_lil_tp4' || true
+    done
+    curl -s -o /dev/null -w 'API :8889/health => HTTP %{http_code}\n' -m 5 http://spark-e116.local:8889/health || true
+
+# Tail the head rank's vLLM log.
+lilquad-log:
+    ssh -o BatchMode=yes spark@spark-e116.local 'docker logs -f --tail 80 glm53_lil_tp4'
+
+# One-shot API health + generation + Korean corruption probe on the LIL endpoint (:8889).
+lilquad-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd {{justfile_directory()}}
+    base="http://spark-e116.local:8889"
+    curl -s -o /dev/null -w 'health => HTTP %{http_code}\n' -m 5 "$base/health" || true
+    curl -s -m 180 "$base/v1/chat/completions" -H "Content-Type: application/json" -d '{
+      "model": "glm-5.3-flash",
+      "messages": [{"role":"user","content":"Reply exactly: LIL QAD LIVE TP4"}],
+      "max_tokens": 16, "temperature": 0,
+      "chat_template_kwargs": {"reasoning_effort": "low"}
+    }' | python3 -m json.tool || true
+    # corruption probe (tonyd2wild #23 protocol): temperature 0, non-streaming
+    curl -s -m 180 "$base/v1/chat/completions" -H "Content-Type: application/json" -d '{
+      "model": "glm-5.3-flash",
+      "messages": [{"role":"user","content":"안녕하세요, 오늘 날씨는 어떤가요? 짧게 한국어로 대답하세요."}],
+      "max_tokens": 64, "temperature": 0
+    }' | python3 quad-launcher/korean_probe.py

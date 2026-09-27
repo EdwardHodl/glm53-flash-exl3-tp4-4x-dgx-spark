@@ -261,11 +261,47 @@ TTFT/aggregate improve or hold, qeval ≥72/75, and the gate stays green.
 
 ## 4. Next action
 
-Phase 2, item 6 (`--load-format instanttensor` + `INSTANTTENSOR_BACKEND=URING`, one boot,
-revert in one line if sm121-v11-dflash2 does not support the loader), then item 7 (512K).
-Say go and I execute Phase 2 end to end (~3.5–4 h including the revert boot of margin).
-The prefix-repair retry (Phase 1 item 3) is re-scheduled to follow Phase 3 item 9e — that
-pack repairs the align-mode hybrid/tail path the hang lives in.
+**Reprioritized 2026-09-26 — the LIL weights trial moved from Phase 5 to NOW as
+Phase 2A, running in parallel as its own lane; Phase 2 (instanttensor on our
+nvidia lane) and Phase 3 continue after.**
+
+Rationale: instanttensor is now *proven* in our image (`just lilquad-image`
+built `glm53-lil:v11-instanttensor` on all 4 ranks and the import verifies), and
+the LIL QAD checkpoint is the only field quant with a plausible quality
+*improvement* (TEB hardmode 89/100) over the nvidia baseline — worth testing
+before spending two days on Phase 3 overlays that a checkpoint swap may
+obsolete. The LIL lane runs as a **parallel trial** (port 8889, container
+`glm53_lil_tp4`, dir `~/glm53-nvfp4-lil`, rendezvous 29521) and never touches
+the serving nvidia lane (port 8888, container `glm53_tp4`); both lanes need all
+four GPUs for graph capture, so boot one at a time — `just lilquad-down` before
+`just quad-up` and vice versa. Promotion = point production traffic at 8889.
+
+New commands (all verified to parse; staging partially executed):
+
+| Command | State |
+|---|---|
+| `just lilquad-image` | **DONE** — `glm53-lil:v11-instanttensor` built + import-verified on all 4 ranks |
+| `just lilquad-download` | **RUNNING** — 186 GiB from HF to e116 `~/glm53-nvfp4-lil` (resumable, log `~/logs/hf-lil-glm53.log`) |
+| `just lilquad-fanout` | pending download — ring legs e116→2ca4 (10.10.0.3) ‖ e116→dc90 (10.10.1.2), then dc90→3ff5 (10.10.3.2) |
+| `just lilquad-check` | pre-boot gate: files, `hf_quant_config.json` (`modelopt MIXED_PRECISION, ignore=[]`), image import, disk ≥186G |
+| `just lilquad-up` | workers 3→2→1 headless then head 0; launcher `lil-rank-launcher.sh` fail-closed pre-flight |
+| `just lilquad-test` | health + generation + Korean-Hangul U+FFFD corruption probe (`korean_probe.py`, tonidy2wild #23 protocol) |
+| `just lilquad-down` | remove containers on all 4 ranks |
+
+Chunky-test gate for the LIL boot (all must pass before any comparison): needle
+gate, tool-call gate, corruption probe ×3 passes = 0 U+FFFD, then ONE RigMark
+window (medians of 2) vs the Phase 1 baseline. Expected-if-real: ≥ the forum's
+28.4 t/s decode c1 MTP k=3 envelope on the same class of hardware; if we land
+far under it, suspect the ModelOpt MTP layer-45 keying (`language_model.model.
+layers.45...`) and check the vLLM boot log before tuning anything else.
+
+Phases 2B–4 unchanged below (instanttensor-on-nvidia re-derives in the LIL lane
+first; run it on the nvidia lane only if the LIL trial is rejected).
+
+Historical: Phase 2 item 6 (`--load-format instanttensor` + `INSTANTTENSOR_BACKEND=URING`
+on the nvidia lane), then item 7 (512K). The prefix-repair retry (Phase 1 item 3)
+is re-scheduled to follow Phase 3 item 9e — that pack repairs the align-mode
+hybrid/tail path the hang lives in.
 
 ## 5. Effort — the next two phases
 
