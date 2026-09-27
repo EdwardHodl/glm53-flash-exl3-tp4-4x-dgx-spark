@@ -204,8 +204,11 @@ quad-test:
 # its own container (glm53_lil_tp4, rendezvous 29521) — STOP the nvidia lane first,
 # both need all four GPUs. Promote = stop quad lane, start lil lane.
 #   just lilquad-stage download|fanout|image|check   (staging phases)
-#   just lilquad-up                                  (boot the LIL trial)
+#   just lilquad-up                                  (boot the LIL lane)
 #   just lilquad-down / -status / -log / -test       (ops)
+# The LIL lane now serves :8888 (promoted 2026-09-27), the contract the clients
+# already point at. The nvidia lane (quad-*) keeps its own container name and
+# would collide on port 8888, so keep exactly one lane up at a time.
 
 # Download the LIL checkpoint to the head (resumable; ~186 GiB from HF CDN).
 lilquad-download:
@@ -224,7 +227,7 @@ lilquad-image:
 lilquad-check:
     bash quad-launcher/lil-stage.sh check
 
-# Bring the LIL quad up (deploy launcher, workers 3->2->1 headless, then head 0; :8889).
+# Bring the LIL quad up (deploy launcher, workers 3->2->1 headless, then head 0; :8888).
 lilquad-up:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -236,12 +239,12 @@ lilquad-up:
       h=$(case $r in 1) echo gx10-dc90.local;; 2) echo spark-3ff5.local;; 3) echo gx10-2ca4.local;; esac)
       echo "== launching LIL rank $r on $h"
       ssh -o BatchMode=yes -i /home/flowai/.ssh/spark_agent_key spark@$h \
-        "NODE_RANK=$r LIL_PORT=8889 LIL_MAX_NUM_SEQS=${LIL_MAX_NUM_SEQS:-8} bash $LIL $r" &
+        "NODE_RANK=$r LIL_PORT=8888 LIL_MAX_NUM_SEQS=${LIL_MAX_NUM_SEQS:-8} bash $LIL $r" &
       sleep 3
     done
     echo "== launching LIL rank 0 on spark-e116.local (head)"
     ssh -o BatchMode=yes spark@spark-e116.local \
-      "NODE_RANK=0 LIL_PORT=8889 LIL_MAX_NUM_SEQS=${LIL_MAX_NUM_SEQS:-8} bash $LIL 0"
+      "NODE_RANK=0 LIL_PORT=8888 LIL_MAX_NUM_SEQS=${LIL_MAX_NUM_SEQS:-8} bash $LIL 0"
     echo "all 4 LIL ranks launched; watch with: just lilquad-log"
 
 # Remove the LIL containers on all 4 ranks.
@@ -263,18 +266,18 @@ lilquad-status:
       echo "== $h"
       ssh -o BatchMode=yes $k spark@$h 'docker ps -a --filter name=glm53_lil_tp4' || true
     done
-    curl -s -o /dev/null -w 'API :8889/health => HTTP %{http_code}\n' -m 5 http://spark-e116.local:8889/health || true
+    curl -s -o /dev/null -w 'API :8888/health => HTTP %{http_code}\n' -m 5 http://spark-e116.local:8888/health || true
 
 # Tail the head rank's vLLM log.
 lilquad-log:
     ssh -o BatchMode=yes spark@spark-e116.local 'docker logs -f --tail 80 glm53_lil_tp4'
 
-# One-shot API health + generation + Korean corruption probe on the LIL endpoint (:8889).
+# One-shot API health + generation + Korean corruption probe on the LIL endpoint (:8888).
 lilquad-test:
     #!/usr/bin/env bash
     set -euo pipefail
     cd {{justfile_directory()}}
-    base="http://spark-e116.local:8889"
+    base="http://spark-e116.local:8888"
     curl -s -o /dev/null -w 'health => HTTP %{http_code}\n' -m 5 "$base/health" || true
     curl -s -m 180 "$base/v1/chat/completions" -H "Content-Type: application/json" -d '{
       "model": "glm-5.3-flash",

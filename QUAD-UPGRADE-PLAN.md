@@ -288,6 +288,28 @@ New commands (all verified to parse; staging partially executed):
 | `just lilquad-test` | health + generation + Korean-Hangul U+FFFD corruption probe (`korean_probe.py`, tonidy2wild #23 protocol) |
 | `just lilquad-down` | remove containers on all 4 ranks |
 
+**Promotion 2026-09-27:** the LIL lane now serves **:8888** (the contract the clients
+already point at); the nvidia lane is down and `just quad-*` would collide on 8888, so run
+exactly one lane at a time. Verified on :8888: HTTP 200, exact instructed generation,
+0 U+FFFD corruption probe, 4/4 ranks up, weight load 46.06 GiB in 67 s, KV pool 3,154,184
+tokens (12.03× @262k).
+
+**Added this session — persistent JIT cache fix (Phase 1 item, measured cause):** TileLang
+defaults to `~/.tilelang/cache`, which is *not* inside the mounted `/root/.cache`, so its
+kernels were recompiled on every boot. The log showed 12–14 inline compiles of
+`mhc_pre_big_fuse_with_norm_tilelang` during a single bench, each blocking ~5 s. The
+launcher now sets `TILELANG_CACHE_DIR=/cache/tilelang` (persistent, 4.4 MB after first
+boot). This is a log-fact finding, independent of any load.
+
+**Throughput numbers retracted.** The 27.1/39.3/57.2/69.0 t/s pair in the receipt is
+**invalid**: the user was using the model concurrently, and the engine log shows
+`Running: 1 reqs` with no bench running (hindsight extraction and the devops cron jobs
+target `192.168.1.6:8888`). Any future throughput claim must use
+`quad-launcher/bench-idle.sh`, which refuses to measure until `Running: 0 reqs` holds for a
+continuous 60 s window and prints the engine-side throughput alongside so a contended run
+is detectable. Nothing in §1's phase ordering changes; the *scheduler* gap (Phase 3) and the
+checkpoint question remain open, now with the LIL lane as the promoted default.
+
 Chunky-test gate for the LIL boot (all must pass before any comparison): needle
 gate, tool-call gate, corruption probe ×3 passes = 0 U+FFFD, then ONE RigMark
 window (medians of 2) vs the Phase 1 baseline. Expected-if-real: ≥ the forum's

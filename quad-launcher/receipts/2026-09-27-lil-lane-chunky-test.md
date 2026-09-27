@@ -62,11 +62,33 @@ Prose prompt, `reasoning_effort: low`.
 | Korean corruption probe | 0 U+FFFD (prior runs) | **0 U+FFFD** | both clean |
 | Needle (2 facts, ~4k ctx) | pass | **pass** | both pass |
 
-**Caveat (must stay visible):** these are single-run, single-operator numbers on a
-non-deterministic MoE accumulation path, 256-token generations, one prompt. They are not
-RigMark medians. The recorded 70–76 t/s baseline figure for the nvidia lane comes from a
-different harness (streaming/measurement method) and is **not** comparable to the 27.1
-figure above — the only apples-to-apples pair in this receipt is 27.1 vs 39.3.
+**RETRACTED 2026-09-27 by user correction — do not cite the throughput numbers above.**
+The user reported actively using the model during these measurements, and the engine log
+confirms concurrent traffic on the endpoint (`Running: 1 reqs` entries with no bench
+running; hindsight extraction and the devops cron jobs target `192.168.1.6:8888`).
+Concurrent load depresses per-request decode throughput by an unknown amount, so the
+27.1 / 39.3 / 57.2 / 69.0 pair is **not** a valid comparison — the difference between the
+two lanes could be entirely load, or could be real, and this data cannot tell which.
+
+Everything else in this receipt survives the correction, because it is load-independent
+(log facts recorded at boot, not timed throughput):
+
+- weight load 66 s / 46.06 GiB at 3.8 GB/s vs 16.55 s/shard × 33 — **valid**
+- KV pool 3,154,184 vs 1,576,246 tokens at the same 24 GiB pin — **valid** (boot log)
+- boot to API-ready ~4 min vs ~13 min — **valid** (wall clock to readiness)
+- corruption probe 0 U+FFFD, needle pass, spec-decode acceptance, MARLIN as the only
+  SM121 NVFP4 backend — **valid** (functional/log facts)
+- TileLang recompiling during inference, and `TILELANG_CACHE_DIR` not persisting —
+  **valid** (log facts, independent of load)
+
+**Required protocol before any throughput claim** (replaces the numbers above):
+1. Confirm the lane is idle — poll the engine log and require `Running: 0 reqs` for a
+   continuous 60 s window immediately before the run, and no external request during it.
+2. Quiesce background clients first (hindsight extraction, devops cron jobs) or point them
+   at another lane.
+3. Record the engine-reported `Avg generation throughput` for the window alongside the
+   wall-clock number; if they disagree, the run was contended.
+4. Repeat on both lanes under the same idle conditions, medians of ≥2.
 
 ## 4. Gate verdict for the chunky test
 

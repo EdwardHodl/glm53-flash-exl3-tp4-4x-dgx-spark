@@ -25,7 +25,7 @@ set -euo pipefail
 
 # ─── site values (never committed; resolved per node) ────────────────────────
 MASTER="192.168.1.6"
-PORT="${LIL_PORT:-8889}"       # trial lane; head serves 0.0.0.0:8889
+PORT="${LIL_PORT:-8888}"       # promoted lane: same endpoint contract as the old nvidia lane
 MPORT=29521                    # distinct rendezvous port from the nvidia lane (29520)
 GID_INDEX="${GID_INDEX:-3}"
 
@@ -62,7 +62,11 @@ test -f "$MODEL_DIR/hf_quant_config.json" || die "missing $MODEL_DIR/hf_quant_co
 test -f "$DRAFT_DIR/model.safetensors"    || die "missing $DRAFT_DIR/model.safetensors"
 test -f "$NCCL_DIR/libnccl.so.2"          || die "missing $NCCL_DIR/libnccl.so.2"
 test -f "$CHAT_TEMPLATE"                  || die "missing $CHAT_TEMPLATE"
-mkdir -p "$CACHE_DIR"
+# Persistent JIT caches (QUAD-UPGRADE-PLAN Phase 1): TileLang defaults to
+# ~/.tilelang/cache, which is NOT under the mounted /root/.cache, so kernels were
+# recompiled on every boot (measured: 14 inline compiles of
+# mhc_pre_big_fuse_with_norm_tilelang during one bench, blocking ~5 s each).
+mkdir -p "$CACHE_DIR" "$CACHE_DIR/tilelang"
 
 # Every served byte is pinned (AGENTS.md): chat template must match the pinned revision.
 printf '%s  %s\n' "$EXPECTED_TEMPLATE_SHA256" "$CHAT_TEMPLATE" | sha256sum --check --status - \
@@ -137,6 +141,7 @@ docker run -d --name "$NAME" --restart no \
   -e VLLM_ONE_GPU_PER_NODE=1 -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e PYTHONUNBUFFERED=1 \
   -e HF_HOME=/cache/hf -e XDG_CACHE_HOME=/cache -e VLLM_CACHE_ROOT=/cache/vllm \
+  -e TILELANG_CACHE_DIR=/cache/tilelang -e TILELANG_TMP_DIR=/cache/tilelang/tmp \
   -e NODE_RANK="$R" -e MASTER_ADDR="$MASTER" \
   -e TORCH_CUDA_ARCH_LIST=12.1a -e FLASHINFER_CUDA_ARCH_LIST=12.1a \
   "$IMAGE" \
