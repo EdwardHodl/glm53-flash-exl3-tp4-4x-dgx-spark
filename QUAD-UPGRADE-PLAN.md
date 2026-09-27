@@ -261,6 +261,12 @@ TTFT/aggregate improve or hold, qeval ≥72/75, and the gate stays green.
 
 ## 4. Next action
 
+**Session close-out 2026-09-27: `HANDOFF-2026-09-27.md` is the resume point** — it organizes
+the map, the measurement record (valid/retracted/historical), the upstream pull loop with
+the 2026-09-27 deltas already assessed, the remaining phases re-scoped, the standing
+reject list, and the notes-to-self. Read it first; this plan remains the detailed
+document behind it.
+
 **Reprioritized 2026-09-26 — the LIL weights trial moved from Phase 5 to NOW as
 Phase 2A, running in parallel as its own lane; Phase 2 (instanttensor on our
 nvidia lane) and Phase 3 continue after.**
