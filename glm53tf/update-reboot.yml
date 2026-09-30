@@ -15,14 +15,14 @@
   gather_facts: false
   tasks:
     - name: No CUDA processes
-      ansible.builtin.shell: nvidia-smi --query-compute-apps=pid --format=csv,noheader | grep -c '[0-9]' || true
+      ansible.builtin.shell: nvidia-smi --query-compute-apps=pid --format=csv,noheader | grep '[0-9]' || true
       register: cuda
       changed_when: false
 
     - name: Assert GPU idle
       ansible.builtin.assert:
-        that: cuda.stdout | trim == '0'
-        fail_msg: "{{ inventory_hostname }} has CUDA pids {{ cuda.stdout }} — `just lilquad-down` first"
+        that: cuda.stdout | trim | length == 0
+        fail_msg: "{{ inventory_hostname }} has CUDA processes ({{ cuda.stdout_lines | join(', ') | truncate(120) }}) — `just lilquad-down` first"
         success_msg: "{{ inventory_hostname }} GPU idle"
 
 - name: Update + upgrade (workers, parallel)
