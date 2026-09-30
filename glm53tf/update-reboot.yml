@@ -1,0 +1,141 @@
+# update-reboot.yml — OS + driver update and reboot across the quad.
+#
+# Order: fire_tp4_workers in parallel (each waits for its own reboot), then the head.
+# Only runs when the LIL lane is down (asserted: no CUDA processes).
+#
+# Steps per node:
+#   1. apt update + full upgrade (nvidia driver pkgs included; DKMS rebuilds on install)
+#   2. reboot (only if /var/run/reboot-required OR the driver changed)
+#   3. wait for ssh back, verify nvidia-smi works + driver version matches the newest
+#
+# Usage: ansible-playbook -i hosts glm53tf/update-reboot.yml
+---
+- name: Pre-check — every node's GPU must be free (LIL down)
+  hosts: fire_tp4
+  gather_facts: false
+  tasks:
+    - name: No CUDA processes
+      ansible.builtin.shell: nvidia-smi --query-compute-apps=pid --format=csv,noheader | grep -c '[0-9]' || true
+      register: cuda
+      changed_when: false
+
+    - name: Assert GPU idle
+      ansible.builtin.assert:
+        that: cuda.stdout | trim == '0'
+        fail_msg: "{{ inventory_hostname }} has CUDA pids {{ cuda.stdout }} — `just lilquad-down` first"
+        success_msg: "{{ inventory_hostname }} GPU idle"
+
+- name: Update + upgrade (workers, parallel)
+  hosts: fire_tp4_workers
+  gather_facts: false
+  tasks:
+    - name: apt update
+      ansible.builtin.shell: apt-get update -qq
+      become: true
+      register: apt_update
+      changed_when: false
+
+    - name: Capture the driver version before
+      ansible.builtin.shell: nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1
+      register: driver_before
+      changed_when: false
+
+    - name: apt upgrade (this may take several minutes; DKMS rebuilds the nvidia module)
+      ansible.builtin.shell: DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade
+      become: true
+      async: 1800
+      poll: 30
+      register: apt_upgrade
+
+    - name: Capture the driver version after
+      ansible.builtin.shell: nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1 2>/dev/null || echo unknown
+      register: driver_after
+      changed_when: false
+
+    - name: Decide whether a reboot is needed (reboot-required flag or driver changed)
+      ansible.builtin.set_fact:
+        needs_reboot: "{{ (apt_upgrade is changed) or (driver_before.stdout != driver_after.stdout) }}"
+
+    - name: Show the plan
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: driver {{ driver_before.stdout }} -> {{ driver_after.stdout | default('?') }},
+          reboot={{ needs_reboot }}
+
+    - name: Reboot
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+        connect_timeout: 15
+      become: true
+      when: needs_reboot | bool
+
+    - name: Verify the GPU after reboot
+      ansible.builtin.shell: nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1
+      register: driver_final
+      changed_when: false
+
+    - name: Assert the driver loads
+      ansible.builtin.assert:
+        that: driver_final.stdout | length > 5
+        fail_msg: "{{ inventory_hostname }}: nvidia-smi failed after reboot — roll back the driver"
+        success_msg: "{{ inventory_hostname }} driver {{ driver_final.stdout | trim }} OK"
+
+- name: Update + upgrade + reboot (the head, after the workers are back)
+  hosts: fire_tp4_head
+  gather_facts: false
+  tasks:
+    - name: apt update
+      ansible.builtin.shell: apt-get update -qq
+      become: true
+      changed_when: false
+
+    - name: Capture the driver version before
+      ansible.builtin.shell: nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1
+      register: driver_before
+      changed_when: false
+
+    - name: apt upgrade
+      ansible.builtin.shell: DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade
+      become: true
+      async: 1800
+      poll: 30
+
+    - name: Capture the driver version after
+      ansible.builtin.shell: nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1 2>/dev/null || echo unknown
+      register: driver_after
+      changed_when: false
+
+    - name: Decide whether a reboot is needed
+      ansible.builtin.set_fact:
+        needs_reboot: "{{ (apt_upgrade is changed) or (driver_before.stdout != driver_after.stdout) }}"
+
+    - name: Reboot
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+        connect_timeout: 15
+      become: true
+      when: needs_reboot | bool
+
+    - name: Verify the GPU after reboot
+      ansible.builtin.shell: nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1
+      register: driver_final
+      changed_when: false
+
+    - name: Assert the driver loads
+      ansible.builtin.assert:
+        that: driver_final.stdout | length > 5
+        fail_msg: "{{ inventory_hostname }}: nvidia-smi failed after reboot — roll back the driver"
+        success_msg: "{{ inventory_hostname }} driver {{ driver_final.stdout | trim }} OK"
+
+- name: Fleet driver-parity check
+  hosts: fire_tp4
+  gather_facts: false
+  tasks:
+    - name: Collect driver versions
+      ansible.builtin.shell: nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1
+      register: drv
+      changed_when: false
+
+    - name: Show
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: driver {{ drv.stdout | trim }}"

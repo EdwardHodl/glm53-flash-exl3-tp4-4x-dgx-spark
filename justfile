@@ -321,3 +321,8 @@ check-glm53tf:
 glm53tf-progress:
 	ssh -o BatchMode=yes -i /home/flowai/.ssh/spark_agent_key spark@spark-3ff5.local \
 	  "tail -f /home/spark/logs/glm53-tf/swap.log"
+
+# ── OS + driver update (run while inference is down; see TP4-OS-DRIVER-UPDATE.md) ──
+# asserts GPUs idle, apt upgrade, reboot workers first, verify drivers; then the head
+tp4-update:
+	ansible-playbook -i hosts glm53tf/update-reboot.yml

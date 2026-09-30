@@ -15,6 +15,17 @@
 | RigMark | `recipes/glm53-tensorfold-spark/scripts/rigmark/` (upstream's turnkey runner) — `scripts/rigmark/install.sh` then `run.sh`; needs the endpoint URL |
 | fire LIL lane | UP on all 4 ranks (glm53_lil_tp4) — must come down for phase 2 |
 
+## Phase 0.5 — OS + driver update (15-25 min, requires LIL DOWN)
+
+```bash
+cd ~/Workspaces/devops/fire
+just lilquad-down          # free the GPUs (also see TP4-OS-DRIVER-UPDATE.md)
+just tp4-update            # apt upgrade + reboot (workers parallel, head last) + driver verify
+```
+e116/2ca4 move 580.159.03 -> latest; dc90 580.173.02 -> latest; 3ff5 is the reference.
+Rollback per TP4-OS-DRIVER-UPDATE.md. After this, the LIL lane stays down until
+the TF lane is up (or `just lilquad-up` to restore it and postpone the window).
+
 ## Phase 0 — preflight (10 min, no interruption)
 
 ```bash
