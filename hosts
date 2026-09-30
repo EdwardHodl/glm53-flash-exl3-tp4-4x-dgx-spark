@@ -32,3 +32,18 @@ spark-3ff5.local
 
 [fire_tf_worker]
 gx10-2ca4.local
+
+# --- glm53tf TP=4 lane (fork 0900; the full quad) ------------------------------
+[fire_tp4]
+spark-e116.local ansible_rank=0
+gx10-dc90.local  ansible_rank=1
+spark-3ff5.local ansible_rank=2
+gx10-2ca4.local  ansible_rank=3
+
+[fire_tp4_head]
+spark-e116.local
+
+[fire_tp4_workers]
+gx10-dc90.local
+spark-3ff5.local
+gx10-2ca4.local

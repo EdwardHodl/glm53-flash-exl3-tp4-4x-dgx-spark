@@ -1,0 +1,227 @@
+# start-glm53tf-tp4.yml — stage, launch and verify the TensorFold TP=4 lane on the fire quad.
+#
+#   rank 0 head : spark-e116.local  (10.10.1.1 f0 / 10.10.0.1 f1) — API 127.0.0.1:8000
+#   rank 1      : gx10-dc90.local   (edge A)
+#   rank 2      : spark-3ff5.local  (edge B)
+#   rank 3      : gx10-2ca4.local   (edge C/D)
+#
+# Model: the 0900 world-size fork (recipes/glm53-tensorfold-spark @ e67d343),
+# image glm53-tensorfold:tp4 built on flint's head and shipped via docker save|load.
+# The LIL vLLM lane must be DOWN on all four nodes before start (GB10 unified memory:
+# the TF engine fills ~100 GiB/rank). Run `just lilquad-down` first.
+#
+# Staging handled here:
+#   - recipe rsync to the head + config install (prod-tp4.env)
+#   - checkpoint: /home/spark/models/tf-uncensored (fetched from flint, verified 92 shards)
+#     copied to a shared HF-cache path per node; workers get theirs over the ring edges
+#   - drafter: already on all four nodes (~/glm53-dflash2-draft, verified)
+#   - image: built on flint head, shipped e116 <- 6efc, then e116 -> dc90/3ff5/2ca4
+#   - prepare: rank folders per node (container, GPU; ~6 min each, parallel across nodes)
+#
+# Usage:
+#   ansible-playbook -i hosts glm53tf/start-glm53tf-tp4.yml                  # everything
+#   ansible-playbook -i hosts glm53tf/start-glm53tf-tp4.yml --tags stage     # staging only
+#   ansible-playbook -i hosts glm53tf/start-glm53tf-tp4.yml --tags launch    # serve + verify
+---
+- name: TP4 stage — recipe, checkpoint, drafter, image (no GPU contention)
+  hosts: fire_tp4_head
+  gather_facts: false
+  vars:
+    recipe_src: "/home/flowai/Workspaces/devops/recipes/glm53-tensorfold-spark"
+    recipe_dst: "/home/spark/glm53-tf"
+    tf_image: "glm53-tensorfold:tp4"
+    flint_head: "spark-6efc.local"
+  tasks:
+    - name: Sync recipe checkout to the head
+      ansible.posix.synchronize:
+        src: "{{ recipe_src }}/"
+        dest: "{{ recipe_dst }}"
+        rsync_opts:
+          - "--exclude=.git"
+          - "--exclude=results"
+          - "--exclude=docs"
+          - "--exclude=bench"
+          - "--exclude=train"
+          - "--exclude=tests"
+          - "--exclude=config/prod.env"
+          - "--exclude=config/prod-tp4.env"
+
+    - name: Install the TP4 config
+      ansible.builtin.copy:
+        src: "{{ recipe_src }}/config/prod-tp4.env"
+        dest: "{{ recipe_dst }}/config/prod-tp4.env"
+        owner: spark
+        group: spark
+        mode: "0600"
+
+    - name: Verify 92 checkpoint shards staged (from flint)
+      ansible.builtin.shell: ls /home/spark/models/tf-uncensored/model-*.safetensors | wc -l
+      register: shards
+      changed_when: false
+
+    - name: Assert checkpoint complete
+      ansible.builtin.assert:
+        that: shards.stdout | int >= 92
+        fail_msg: "Only {{ shards.stdout }}/92 shards — the flint->e116 fetch is still running"
+        success_msg: "checkpoint complete (92 shards)"
+
+    - name: Verify the drafter is staged
+      ansible.builtin.stat:
+        path: /home/spark/glm53-dflash2-draft
+      register: drafter
+
+    - name: Assert drafter present
+      ansible.builtin.assert:
+        that: drafter.stat.exists
+        success_msg: "drafter present"
+
+    - name: Build the TP4 image on the head if missing
+      ansible.builtin.shell: |
+        if docker image inspect {{ tf_image }} >/dev/null 2>&1; then
+          echo IMAGE-EXISTS
+        else
+          cd {{ recipe_dst }} && docker build -f docker/Dockerfile -t {{ tf_image }} . >/tmp/glm53tf-tp4-build.log 2>&1
+          echo IMAGE-BUILT
+        fi
+      register: build
+      changed_when: "'IMAGE-BUILT' in build.stdout"
+
+    - name: Ship the image to the three workers if missing there
+      ansible.builtin.shell: |
+        for w in $(grep -A4 '\[fire_tp4_workers\]' /dev/null 2>/dev/null; echo "gx10-dc90.local spark-3ff5.local gx10-2ca4.local"); do
+          if ssh -o BatchMode=yes spark@$w docker image inspect {{ tf_image }} >/dev/null 2>&1; then
+            echo "$w: IMAGE-ON-WORKER"
+          else
+            docker save {{ tf_image }} | ssh spark@$w docker load >/dev/null 2>&1 && echo "$w: IMAGE-SHIPPED"
+          fi
+        done
+      register: ship
+      changed_when: "'IMAGE-SHIPPED' in ship.stdout"
+
+    - name: Ship the checkpoint to the three workers (ring edges; resumable, ~35 min each at 150 MB/s)
+      ansible.builtin.shell: |
+        for w in $(grep -A4 '\[fire_tp4_workers\]' /dev/null 2>/dev/null; echo "gx10-dc90.local spark-3ff5.local gx10-2ca4.local"); do
+          if ssh -o BatchMode=yes spark@$w test -f /home/spark/models/tf-uncensored/model-00092-of-00092.safetensors 2>/dev/null; then
+            echo "$w: CKPT-OK"
+          else
+            ssh spark@$w mkdir -p /home/spark/models/tf-uncensored
+            nohup rsync -a --partial --ignore-existing /home/spark/models/tf-uncensored/ spark@$w:/home/spark/models/tf-uncensored/ >/dev/null 2>&1 &
+            echo "$w: CKPT-SYNC-LAUNCHED"
+          fi
+        done
+        wait
+      register: ckpt
+      changed_when: "'CKPT-SYNC-LAUNCHED' in ckpt.stdout"
+
+    - name: Show staging state
+      ansible.builtin.debug:
+        msg: "{{ ship.stdout_lines }} {{ ckpt.stdout_lines }}"
+  tags: stage
+
+- name: TP4 prepare — rank folders on each node (GPU work; LIL must be down)
+  hosts: fire_tp4
+  gather_facts: false
+  vars:
+    recipe_dst: "/home/spark/glm53-tf"
+  tasks:
+    - name: Ensure log dir
+      ansible.builtin.file:
+        path: /home/spark/logs/glm53-tf
+        state: directory
+        owner: spark
+        group: spark
+        mode: "0755"
+
+    - name: Run the rank prepare (container, --rank from inventory; ~6 min each, nodes in parallel)
+      ansible.builtin.shell: |
+        rank={{ hostvars[inventory_hostname].ansible_rank | default(0) }}
+        cd {{ recipe_dst }}
+        CONFIG=config/prod-tp4.env scripts/prepare.sh "$rank"
+      args:
+        executable: /bin/bash
+      async: 1200
+      poll: 30
+  tags: prepare
+
+- name: TP4 launch + verify
+  hosts: fire_tf_head
+  gather_facts: false
+  vars:
+    recipe_dst: "/home/spark/glm53-tf"
+    log_dir: "/home/spark/logs/glm53-tf"
+  tasks:
+    - name: Refuse to start while a foreign GPU container is up on any node
+      ansible.builtin.shell: |
+        for h in spark-e116.local gx10-dc90.local spark-3ff5.local gx10-2ca4.local; do
+          ssh -o BatchMode=yes spark@$h \
+            "docker ps --format '{{ "{{" }}.Names{{ "}}" }}' | grep -v glm53-tf | while read -r c; do
+               docker inspect -f '{{ "{{" }}json .HostConfig.DeviceRequests{{ "}}" }}' \"\$c\" 2>/dev/null | grep -qi gpu && echo \"BUSY:\$c\"
+             done"
+        done
+        echo CHECKED
+      register: foreign
+      changed_when: false
+
+    - name: Abort on foreign GPU containers
+      ansible.builtin.assert:
+        that: "'BUSY:' not in foreign.stdout"
+        fail_msg: "a node still holds a foreign GPU container (LIL lane up?): {{ foreign.stdout }}"
+        success_msg: "all four GPUs free"
+
+    - name: Launch the lane (ranks 3,2,1 remote; 0 local)
+      ansible.builtin.shell: |
+        cd {{ recipe_dst }} && nohup bash -c \
+          'CONFIG=config/prod-tp4.env scripts/serve-tp4.sh start >> {{ log_dir }}/swap-tp4.log 2>&1' >/dev/null 2>&1 &
+        echo "launched pid $!"
+      register: launch
+      changed_when: true
+
+    - name: Wait for rank 0 to serve (up to 25 min — first boot compiles per-node kernels)
+      ansible.builtin.shell: |
+        for i in $(seq 1 150); do
+          if curl -sf -m3 http://127.0.0.1:8000/health >/dev/null 2>&1; then echo UP; exit 0; fi
+          sleep 10
+        done
+        echo TIMEOUT; tail -20 {{ log_dir }}/swap-tp4.log; exit 1
+      register: health_wait
+      changed_when: false
+      timeout: 1600
+
+    - name: Models endpoint (context 1M, tensorfold owner)
+      ansible.builtin.shell: curl -sf -m5 http://127.0.0.1:8000/v1/models
+      register: models
+      changed_when: false
+
+    - name: Assert 1M context + tensorfold
+      ansible.builtin.assert:
+        that:
+          - "'1048576' in models.stdout"
+          - "'tensorfold' in models.stdout"
+        fail_msg: "models payload unexpected: {{ models.stdout | truncate(200) }}"
+        success_msg: "TP4 lane serving: context 1,048,576, owned_by tensorfold"
+
+    - name: Text smoke — 17*19 = 323
+      ansible.builtin.shell: |
+        curl -sf -m60 http://127.0.0.1:8000/v1/chat/completions \
+          -H 'Content-Type: application/json' \
+          -d '{"model":"GLM-5.3-Flash-EXL3","max_tokens":200,
+               "messages":[{"role":"user","content":"17*19=? Answer with just the number."}]}' \
+          | python3 -c 'import json,sys; d=json.load(sys.stdin); m=d["choices"][0]["message"]; print(m.get("content") or m.get("reasoning"))'
+      register: text_smoke
+      changed_when: false
+
+    - name: Assert text smoke
+      ansible.builtin.assert:
+        that: "'323' in text_smoke.stdout"
+        fail_msg: "text smoke got: {{ text_smoke.stdout | truncate(200) }}"
+        success_msg: "text smoke 17*19=323 ok"
+
+    - name: All four ranks up
+      ansible.builtin.shell: docker ps --filter name=glm53-tf-r --format '{{ "{{" }}.Names{{ "}}" }}' | sort
+      register: containers
+      changed_when: false
+
+    - name: Show containers
+      ansible.builtin.debug:
+        msg: "{{ containers.stdout_lines }}"
+  tags: launch
