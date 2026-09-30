@@ -228,6 +228,12 @@ lilquad-check:
     bash quad-launcher/lil-stage.sh check
 
 # Bring the LIL quad up (deploy launcher, workers 3->2->1 headless, then head 0; :8888).
+# Context is an ENVIRONMENT override, not a just argument:
+#   LIL_MAX_MODEL_LEN=393216 just lilquad-up     # 384K  (promoted config)
+#   LIL_MAX_NUM_SEQS=8 LIL_MAX_MODEL_LEN=393216 just lilquad-up
+#   just lilquad-up                              # default 262144
+# NOTE: `just lilquad-up LIL_MAX_MODEL_LEN=393216` FAILS (just reads it as a recipe name —
+# "justfile does not contain recipe"); the recipe declares no parameters.
 lilquad-up:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -291,3 +297,27 @@ lilquad-test:
       "messages": [{"role":"user","content":"안녕하세요, 오늘 날씨는 어떤가요? 짧게 한국어로 대답하세요."}],
       "max_tokens": 64, "temperature": 0
     }' | python3 quad-launcher/korean_probe.py
+
+# ── glm53tf lane: TensorFold GLM-5.3-Flash TP=2 on a ring edge ────────────────
+# Flint-proven recipe (5624dfc, image b9) on the fire quad. Default pair per
+# TF4-SCOPING.md: spark-3ff5 (head, rank 0) + gx10-2ca4 (worker, rank 1), edge C
+# (10.10.2.x). API 127.0.0.1:8000 on the head; the LIL lane keeps :8888.
+# The LIL lane must be DOWN on both pair nodes (GB10 unified memory) — run
+# `just lilquad-down` first if it is up, or accept the preflight abort.
+
+# Stage + launch + verify the TensorFold lane (playbook does everything)
+start-glm53tf:
+	ansible-playbook -i hosts glm53tf/start-glm53tf.yml
+
+# Stop the TensorFold lane, assert containers + GPU released
+stop-glm53tf:
+	ansible-playbook -i hosts glm53tf/stop-glm53tf.yml
+
+# Run-any-time verification (hosts, edge C fabric, RoCE, health, smokes, canary)
+check-glm53tf:
+	ansible-playbook -i hosts glm53tf/check-glm53tf.yml
+
+# Tail the TensorFold swap/boot log on the TF head
+glm53tf-progress:
+	ssh -o BatchMode=yes -i /home/flowai/.ssh/spark_agent_key spark@spark-3ff5.local \
+	  "tail -f /home/spark/logs/glm53-tf/swap.log"

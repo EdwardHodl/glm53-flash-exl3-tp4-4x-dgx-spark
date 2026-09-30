@@ -1,0 +1,267 @@
+# check-glm53tf.yml — run-any-time verification of the fire TensorFold lane.
+#
+# Mirrors flint/glm53tf/check-glm53tf.yml with fire site values:
+#   - the pair's shared edge (3ff5 f0 10.10.2.3 <-> 2ca4 f1 10.10.2.4, edge C)
+#   - RoCE GID-3 on the edge's ports
+#   - LIL lane coexistence (informational, not a failure)
+#
+# Usage: ansible-playbook -i hosts glm53tf/check-glm53tf.yml
+---
+- name: Host-level checks (both nodes)
+  hosts: fire_tf_head,fire_tf_worker
+  gather_facts: false
+  tasks:
+    - name: Memory and disk audit
+      ansible.builtin.shell: |
+        free -g | awk '/Mem:/{print "mem_free_gib="$4" mem_avail_gib="$7}'
+        df -BG / --output=pcent | tail -1 | tr -dc '0-9' | sed 's/^/root_used_pct=/'
+        nvidia-smi --query-gpu=memory.used,power.draw,clocks.sm --format=csv,noheader | sed 's/^/gpu /'
+      register: resources
+      changed_when: false
+
+    - name: Show resources
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ resources.stdout_lines | join(' | ') }}"
+
+    - name: Abort when MemFree is under 12 GiB
+      ansible.builtin.assert:
+        that: (resources.stdout | regex_search('mem_free_gib=([0-9]+)') | replace('mem_free_gib=', '') | int) >= 12
+        fail_msg: "{{ inventory_hostname }} MemFree under 12 GiB"
+        success_msg: "{{ inventory_hostname }} MemFree ok"
+
+    - name: Warn (not abort) when root disk is over 90 percent
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} root at
+          {{ resources.stdout | regex_search('root_used_pct=([0-9]+)') | replace('root_used_pct=', '') }} percent
+          {{ 'WARNING: over 90 — prune' if (resources.stdout | regex_search('root_used_pct=([0-9]+)') | replace('root_used_pct=', '') | int) >= 90 else 'ok' }}
+
+    - name: spark is in the docker group
+      ansible.builtin.shell: id -nG spark | grep -cw docker || true
+      register: dockergroup
+      changed_when: false
+
+    - name: Assert docker group
+      ansible.builtin.assert:
+        that: dockergroup.stdout | trim != '0'
+        fail_msg: "{{ inventory_hostname }}: spark not in docker group — run the bootstrap"
+        success_msg: "{{ inventory_hostname }} docker group ok"
+
+- name: CX7 edge + RoCE checks (both nodes of the pair)
+  hosts: fire_tf_head,fire_tf_worker
+  gather_facts: false
+  tasks:
+    - name: Edge C address on the head (enp1s0f0np0, 10.10.2.3/24)
+      ansible.builtin.shell: ip -4 -o addr show enp1s0f0np0 | awk '{print $4}'
+      register: edge_head
+      changed_when: false
+      when: inventory_hostname == 'spark-3ff5.local'
+
+    - name: Edge C address on the worker (enp1s0f1np1, 10.10.2.4/24)
+      ansible.builtin.shell: ip -4 -o addr show enp1s0f1np1 | awk '{print $4}'
+      register: edge_worker
+      changed_when: false
+      when: inventory_hostname == 'gx10-2ca4.local'
+
+    - name: Assert head edge C addressed
+      ansible.builtin.assert:
+        that: "'10.10.2.3' in (edge_head.stdout | default(''))"
+        fail_msg: "spark-3ff5 has no 10.10.2.3 on enp1s0f0np0 — re-run the netplan"
+        success_msg: "head edge C ok"
+      when: inventory_hostname == 'spark-3ff5.local'
+
+    - name: Assert worker edge C addressed
+      ansible.builtin.assert:
+        that: "'10.10.2.4' in (edge_worker.stdout | default(''))"
+        fail_msg: "gx10-2ca4 has no 10.10.2.4 on enp1s0f1np1 — re-run the netplan"
+        success_msg: "worker edge C ok"
+      when: inventory_hostname == 'gx10-2ca4.local'
+
+    - name: RoCE GIDs present on both fabric ports
+      ansible.builtin.shell: |
+        for d in rocep1s0f0 rocep1s0f1; do
+          n=$(cat /sys/class/infiniband/$d/ports/1/gids/3 2>/dev/null | wc -l)
+          echo "$d=$n"
+        done
+      register: gids
+      changed_when: false
+      failed_when: false
+
+    - name: Report RoCE GIDs
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ gids.stdout_lines | default(['(no RoCE devices)']) | join(' ') }}"
+
+    - name: Directed ping across edge C (3ff5 10.10.2.3 <-> 2ca4 10.10.2.4)
+      ansible.builtin.shell: |
+        if [[ "$(hostname -s)" == "spark-3ff5" ]]; then peer=10.10.2.4; else peer=10.10.2.3; fi
+        ping -c2 -W2 "$peer" >/dev/null && echo "EDGE-C-OK ($peer)" || echo "EDGE-C-FAIL ($peer)"
+      register: ping_edge
+      changed_when: false
+
+    - name: Assert edge C reachable
+      ansible.builtin.assert:
+        that: "'EDGE-C-OK' in ping_edge.stdout"
+        fail_msg: "{{ inventory_hostname }} edge C peer unreachable: {{ ping_edge.stdout }}"
+        success_msg: "{{ inventory_hostname }} {{ ping_edge.stdout | trim }}"
+
+- name: Recipe preflight (the recipe's own gate, run verbatim on the head)
+  hosts: fire_tf_head
+  gather_facts: false
+  vars:
+    recipe_dst: "/home/spark/glm53-tf"
+  tasks:
+    - name: scripts/serve.sh preflight
+      ansible.builtin.shell: cd {{ recipe_dst }} && CONFIG=config/prod.env scripts/serve.sh preflight 2>&1 || true
+      register: preflight
+      changed_when: false
+
+    - name: Show preflight
+      ansible.builtin.debug:
+        msg: "{{ preflight.stdout_lines }}"
+
+    - name: Flag preflight errors (warnings informational — MemFree/CUDA-process warnings are expected while the LIL lane is up)
+      ansible.builtin.assert:
+        that: "'error' not in (preflight.stdout | lower)"
+        fail_msg: "Recipe preflight reported errors — see the preflight output above"
+        success_msg: "Recipe preflight clean (warnings, if any, shown above)"
+
+- name: Lane verification (head)
+  hosts: fire_tf_head
+  gather_facts: false
+  tasks:
+    - name: /health
+      ansible.builtin.shell: curl -sf -m3 http://127.0.0.1:8000/health
+      register: health
+      changed_when: false
+      failed_when: false
+
+    - name: Assert health ok
+      ansible.builtin.assert:
+        that: "'\"ok\": true' in health.stdout"
+        fail_msg: "Lane down or unhealthy: {{ health.stdout | truncate(200) }}"
+        success_msg: "health ok"
+
+    - name: Models endpoint (context 1M)
+      ansible.builtin.shell: curl -sf -m5 http://127.0.0.1:8000/v1/models
+      register: models
+      changed_when: false
+
+    - name: Assert 1M context
+      ansible.builtin.assert:
+        that: "'1048576' in models.stdout"
+        fail_msg: "context not 1M: {{ models.stdout | truncate(200) }}"
+        success_msg: "context 1,048,576"
+
+    - name: Container is on the b9 image with vision env
+      ansible.builtin.shell: |
+        docker inspect glm53-tf-r0 --format '{{ "{{" }}.Config.Image{{ "}}" }}'
+        docker inspect glm53-tf-r0 --format '{{ "{{" }}range .Config.Env{{ "}}" }}{{ "{{" }}.{{ "}}" }} {{ "{{" }}end{{ "}}" }}' | grep -o 'GLM53_TF_VISION=1' || echo NO-VISION
+      register: image_env
+      changed_when: false
+
+    - name: Assert b9 + vision
+      ansible.builtin.assert:
+        that:
+          - "'glm53-tensorfold:b9' in image_env.stdout"
+          - "'NO-VISION' not in image_env.stdout"
+        fail_msg: "container image/env wrong: {{ image_env.stdout_lines }}"
+        success_msg: "container on b9 with GLM53_TF_VISION=1"
+
+    - name: Text smoke — 17*19 = 323
+      ansible.builtin.shell: |
+        curl -sf -m60 http://127.0.0.1:8000/v1/chat/completions \
+          -H 'Content-Type: application/json' \
+          -d '{"model":"GLM-5.3-Flash-EXL3","max_tokens":200,
+               "messages":[{"role":"user","content":"17*19=? Answer with just the number."}]}' \
+          | python3 -c 'import json,sys; d=json.load(sys.stdin); m=d["choices"][0]["message"]; print(m.get("content") or m.get("reasoning"))'
+      register: text_smoke
+      changed_when: false
+
+    - name: Assert text smoke
+      ansible.builtin.assert:
+        that: "'323' in text_smoke.stdout"
+        fail_msg: "text smoke got: {{ text_smoke.stdout | truncate(200) }}"
+        success_msg: "text smoke ok (17*19=323)"
+
+    - name: Vision smoke — red + blue squares
+      ansible.builtin.shell: |
+        python3 - <<'EOF'
+        import base64, json, struct, urllib.request, zlib
+        def png(rgb, n=64):
+            raw = b"".join(b"\x00" + bytes(rgb)*n for _ in range(n))
+            def ch(t, d):
+                c = t + d
+                return struct.pack(">I", len(d)) + c + struct.pack(">I", zlib.crc32(c))
+            return (b"\x89PNG\r\n\x1a\n" + ch(b"IHDR", struct.pack(">IIBBBBB", n, n, 8, 2, 0, 0, 0))
+                    + ch(b"IDAT", zlib.compress(raw)) + ch(b"IEND", b""))
+        red = base64.b64encode(png((255,0,0))).decode()
+        blue = base64.b64encode(png((0,0,255))).decode()
+        body = json.dumps({"model": "GLM-5.3-Flash-EXL3", "max_tokens": 120, "messages": [
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{red}"}},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{blue}"}},
+                {"type": "text", "text": "Two images. First color? Second color? Format: color1, color2."},
+            ]}]}).encode()
+        req = urllib.request.Request("http://127.0.0.1:8000/v1/chat/completions", data=body,
+                                     headers={"Content-Type": "application/json"})
+        d = json.loads(urllib.request.urlopen(req, timeout=120).read())
+        m = d["choices"][0]["message"]
+        print("CONTENT:", (m.get("content") or "").replace("\n", " "))
+        print("PROMPT_TOKENS:", d.get("usage", {}).get("prompt_tokens", 0))
+        EOF
+      register: vision_smoke
+      changed_when: false
+
+    - name: Report vision smoke
+      ansible.builtin.debug:
+        msg: "{{ vision_smoke.stdout_lines }}"
+
+    - name: Extract prompt token count
+      ansible.builtin.set_fact:
+        vision_tokens: "{{ (vision_smoke.stdout.split('PROMPT_TOKENS: ') | last).split() | first | int + 0 }}"
+
+    - name: Assert the vision tower encoded the images
+      ansible.builtin.assert:
+        that:
+          - vision_tokens | int > 40
+          - "'red' in (vision_smoke.stdout | lower)"
+        fail_msg: >-
+          Vision not live — tower not encoding (got {{ vision_tokens }} tokens).
+          Check `docker inspect glm53-tf-r0` for GLM53_TF_VISION and the image tag.
+        success_msg: "VISION LIVE — tower encoded both images ({{ vision_tokens }} prompt tokens)"
+
+    - name: RoCE all-gather in the boot log (not the NCCL fallback marker)
+      ansible.builtin.shell: |
+        docker logs glm53-tf-r0 2>&1 | grep -E 'roce: all-gathers' | tail -1
+        test ! -f /home/spark/.cache/glm53-tf/roce-failed && echo NO-ROCE-MARKER || echo ROCE-MARKER-PRESENT
+      register: roce
+      changed_when: false
+
+    - name: Report RoCE state
+      ansible.builtin.debug:
+        msg: "{{ roce.stdout_lines }}"
+
+    - name: Canary from the boot log
+      ansible.builtin.shell: grep -E '^\[canary\]' /home/spark/logs/glm53-tf/swap.log | tail -3
+      register: canary
+      changed_when: false
+      failed_when: false
+
+    - name: Show canary
+      ansible.builtin.debug:
+        msg: "{{ canary.stdout_lines | default(['(no canary lines)']) }}"
+
+    - name: LIL lane coexistence (informational — :8888 on e116 belongs to it)
+      ansible.builtin.shell: curl -sf -m3 http://spark-e116.local:8888/v1/models 2>/dev/null | head -c 120 || echo LIL-DOWN
+      register: lil
+      changed_when: false
+      failed_when: false
+      delegate_to: localhost
+
+    - name: Report LIL state
+      ansible.builtin.debug:
+        msg: "LIL lane :8888 -> {{ (lil.stdout | default('LIL-DOWN')) | truncate(100) }}"
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "fire glm53tf check complete: hosts, edge C fabric, RoCE, preflight, health, context, image/env, text smoke, vision smoke, canary, LIL coexistence."

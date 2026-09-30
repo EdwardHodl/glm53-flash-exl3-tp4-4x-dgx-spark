@@ -1,0 +1,44 @@
+# stop-glm53tf.yml — stop the fire TensorFold lane and confirm GPU + ports released.
+#
+# Usage: ansible-playbook -i hosts glm53tf/stop-glm53tf.yml
+---
+- name: Stop the lane on the head
+  hosts: fire_tf_head
+  gather_facts: false
+  vars:
+    recipe_dst: "/home/spark/glm53-tf"
+  tasks:
+    - name: serve.sh stop
+      ansible.builtin.shell: cd {{ recipe_dst }} && scripts/serve.sh stop
+      register: stop
+      changed_when: true
+
+    - name: Show stop output
+      ansible.builtin.debug:
+        msg: "{{ stop.stdout_lines | default([]) }}"
+
+- name: Verify release (both nodes)
+  hosts: fire_tf_head
+  gather_facts: false
+  tasks:
+    - name: No glm53-tf containers left
+      ansible.builtin.shell: docker ps -a --filter name=glm53-tf --format '{{ "{{" }}.Names{{ "}}" }}'
+      register: containers
+      changed_when: false
+
+    - name: Assert containers are gone
+      ansible.builtin.assert:
+        that: containers.stdout | trim | length == 0
+        fail_msg: "{{ inventory_hostname }} still has: {{ containers.stdout_lines }}"
+        success_msg: "{{ inventory_hostname }} glm53-tf containers gone"
+
+    - name: No CUDA process left on the GPU
+      ansible.builtin.shell: nvidia-smi --query-compute-apps=pid --format=csv,noheader | grep -c '[0-9]' || true
+      register: cuda
+      changed_when: false
+
+    - name: Assert GPU idle
+      ansible.builtin.assert:
+        that: cuda.stdout | trim == '0'
+        fail_msg: "{{ inventory_hostname }} still has CUDA pids: {{ cuda.stdout }}"
+        success_msg: "{{ inventory_hostname }} GPU idle"

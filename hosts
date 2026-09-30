@@ -1,19 +1,34 @@
-# fire — GLM-5.3-Flash-EXL3 TP=3 triangle (ansible ini inventory, mirrors sparks/hosts style)
-# spark-e116.local rank 0 (head, API :8888) | gx10-2ca4.local rank 1 | spark-3ff5.local rank 2
+# hosts — fire cluster (GLM lanes: vLLM LIL tp4, tp3 legacy, glm53tf)
+#
+# Rank order of the quad ring (netplan/quad, MAC-verified 2026-09-25):
+#   e116(0) -> dc90(1) -> 3ff5(2) -> 2ca4(3)
+# Ring edges: A e116-dc90 10.10.1.x | B dc90-3ff5 10.10.3.x | C 3ff5-2ca4 10.10.2.x | D 2ca4-e116 10.10.0.x
 
 [fire_nodes]
 spark-e116.local ansible_host=spark-e116.local ansible_user=spark
+gx10-dc90.local  ansible_host=gx10-dc90.local  ansible_user=spark
+spark-3ff5.local ansible_host=spark-3ff5.local ansible_user=spark
 gx10-2ca4.local  ansible_host=gx10-2ca4.local  ansible_user=spark
-spark-3ff5.local ansible_host=spark-3ff5.local ansible_user=spark ansible_private_key_file=/home/flowai/.ssh/spark_agent_key
 
 [fire_nodes:vars]
-ansible_ssh_private_key_file=~/.ssh/spark_agent_key
+ansible_ssh_private_key_file=/home/flowai/.ssh/spark_agent_key
 ansible_become=yes
 ansible_become_method=sudo
 
+# head of the quad ring (LIL lane + legacy tp3 lane)
 [fire_heads]
 spark-e116.local
 
 [fire_workers]
-gx10-2ca4.local
+gx10-dc90.local
 spark-3ff5.local
+gx10-2ca4.local
+
+# --- glm53tf TensorFold lane (TP=2 on an edge of the ring) --------------------
+# Default pair per TF4-SCOPING.md: edge C (3ff5 head, 2ca4 worker) — keeps the
+# LIL lane untouched. Change both groups together if the pair decision changes.
+[fire_tf_head]
+spark-3ff5.local
+
+[fire_tf_worker]
+gx10-2ca4.local

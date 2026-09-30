@@ -1,0 +1,299 @@
+# start-glm53tf.yml — stage, launch and verify the GLM-5.3-Flash TensorFold lane
+# on an edge of the fire quad ring (TP=2, flint-proven recipe @ 5624dfc, image b9).
+#
+#   head   : spark-3ff5.local   (rank 0, TF API 127.0.0.1:8000; optional nginx LAN proxy)
+#   worker : gx10-2ca4.local   (rank 1, headless)
+#
+# Mirrors flint/glm53tf/start-glm53tf.yml; deltas are site values only (see
+# TF4-SCOPING.md). The LIL lane (glm53_lil_tp4) keeps :8888 — this lane takes
+# :8001 via config prod.env PORT, so the two never collide.
+#
+# Usage: ansible-playbook -i hosts glm53tf/start-glm53tf.yml
+---
+- name: Preflight — fabric edge, GPU exclusivity, memory, disk
+  hosts: fire_nodes
+  gather_facts: false
+  tasks:
+    - name: MemFree check (>= 12 GiB; the LIL lane holds ~100 GiB where it runs)
+      ansible.builtin.shell: free -g | awk '/Mem:/{print $4}'
+      register: memfree
+      changed_when: false
+
+    - name: Report MemFree
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} MemFree {{ memfree.stdout }} GiB"
+
+    - name: Disk audit — warn at 90 percent, abort at 95 (no /tmp means no ansible)
+      ansible.builtin.shell: df -BG / --output=pcent | tail -1 | tr -dc '0-9'
+      register: diskpct
+      changed_when: false
+
+    - name: Abort when disk is critical
+      ansible.builtin.assert:
+        that: diskpct.stdout | int < 95
+        fail_msg: >-
+          {{ inventory_hostname }} root {{ diskpct.stdout }} percent — prune first
+          (see TF4-SCOPING.md section 5 phase 1)
+        success_msg: "{{ inventory_hostname }} root {{ diskpct.stdout }} percent used"
+
+    - name: GPU state (informational — the LIL lane is expected to be up on ring ranks)
+      ansible.builtin.shell: nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader | head -3
+      register: gpuapps
+      changed_when: false
+      failed_when: false
+
+    - name: Show GPU apps
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ gpuapps.stdout_lines | default(['GPU idle']) | join(' | ') }}"
+
+- name: Gate — the TF worker pair must be free of other GPU work
+  hosts: fire_tf_head
+  gather_facts: false
+  vars:
+    tf_worker: "gx10-2ca4.local"
+  tasks:
+    - name: Refuse to start while the worker runs a foreign GPU container
+      ansible.builtin.shell: |
+        ssh -o BatchMode=yes spark@{{ tf_worker }} \
+          'docker ps --format "{{ "{{" }}.Names{{ "}}" }}" | grep -vE "^(glm53-tf-|dsv41-exl3-nfs)$" | while read -r c; do
+             docker inspect -f "{{ "{{" }}json .HostConfig.DeviceRequests{{ "}}" }}" "$c" 2>/dev/null | grep -qi gpu && echo "BUSY:$c"
+           done; echo CHECKED'
+      register: worker_foreign
+      changed_when: false
+
+    - name: Assert worker GPU free
+      ansible.builtin.assert:
+        that: "'BUSY:' not in worker_foreign.stdout"
+        fail_msg: "TF worker {{ tf_worker }} has a foreign GPU container: {{ worker_foreign.stdout }}"
+        success_msg: "TF worker {{ tf_worker }} GPU free"
+
+    - name: Refuse to start while the head runs a foreign GPU container
+      ansible.builtin.shell: |
+        for c in $(docker ps --format '{{ "{{" }}.Names{{ "}}" }}'); do
+          case "$c" in glm53-tf-*|dsv41-exl3-nfs) continue ;; esac
+          docker inspect -f '{{ "{{" }}json .HostConfig.DeviceRequests{{ "}}" }}' "$c" | grep -qi gpu && echo "BUSY:$c"
+        done
+        echo CHECKED
+      register: head_foreign
+      changed_when: false
+
+    - name: Assert head GPU free
+      ansible.builtin.assert:
+        that: "'BUSY:' not in head_foreign.stdout"
+        fail_msg: "TF head has a foreign GPU container: {{ head_foreign.stdout }}"
+        success_msg: "TF head GPU free"
+
+- name: Stage recipe + weights + config on the head
+  hosts: fire_tf_head
+  gather_facts: false
+  vars:
+    recipe_src: "/home/flowai/Workspaces/devops/recipes/glm53-tensorfold-spark"
+    recipe_dst: "/home/spark/glm53-tf"
+    tf_image: "glm53-tensorfold:b9"
+    flint_head: "spark-6efc.local"
+  tasks:
+    - name: Sync recipe checkout (includes scripts/prepare-main.sh — the upstream __main__ bug fix; do NOT exclude it)
+      ansible.posix.synchronize:
+        src: "{{ recipe_src }}/"
+        dest: "{{ recipe_dst }}"
+        rsync_opts:
+          - "--exclude=.git"
+          - "--exclude=results"
+          - "--exclude=docs"
+          - "--exclude=bench"
+          - "--exclude=train"
+          - "--exclude=tests"
+          - "--exclude=config/prod.env"
+
+    - name: Install fire config (site values + W17 knobs)
+      ansible.builtin.copy:
+        src: "{{ recipe_src }}/config/prod.env"
+        dest: "{{ recipe_dst }}/config/prod.env"
+        owner: spark
+        group: spark
+        mode: "0600"
+
+    - name: Pin the b9 image in the installed config
+      ansible.builtin.lineinfile:
+        path: "{{ recipe_dst }}/config/prod.env"
+        regexp: '^IMAGE='
+        line: "IMAGE={{ tf_image }}"
+
+    - name: Abort when the checkpoint is missing on the head
+      ansible.builtin.shell: |
+        find /home/spark/.cache/huggingface/hub/models--neko-legends--GLM-5.3-Flash-Uncensored-EXL3 \
+          -name 'model-*.safetensors' 2>/dev/null | wc -l
+      register: shards
+      changed_when: false
+
+    - name: Assert 92 checkpoint shards
+      ansible.builtin.assert:
+        that: shards.stdout | int >= 92
+        fail_msg: >-
+          Only {{ shards.stdout }}/92 shards staged. Run the stage step in
+          TF4-SCOPING.md phase 1 (rsync from flint's head or hf download).
+
+    - name: Build the b9 image on the head if missing (layer cache may be cold — budget 1-2 h)
+      ansible.builtin.shell: |
+        if docker image inspect {{ tf_image }} >/dev/null 2>&1; then
+          echo IMAGE-EXISTS
+        else
+          cd {{ recipe_dst }} && docker build -f docker/Dockerfile -t {{ tf_image }} . >/tmp/glm53tf-build.log 2>&1
+          echo IMAGE-BUILT
+        fi
+      register: build
+      changed_when: "'IMAGE-BUILT' in build.stdout"
+
+    - name: Ship the image to the worker if missing there
+      ansible.builtin.shell: |
+        if ssh -o BatchMode=yes spark@gx10-2ca4.local docker image inspect {{ tf_image }} >/dev/null 2>&1; then
+          echo IMAGE-ON-WORKER
+        else
+          docker save {{ tf_image }} | ssh spark@gx10-2ca4.local docker load >/tmp/glm53tf-ship.log 2>&1
+          echo IMAGE-SHIPPED
+        fi
+      register: ship
+      changed_when: "'IMAGE-SHIPPED' in ship.stdout"
+
+    - name: Show image state
+      ansible.builtin.debug:
+        msg: "image: {{ build.stdout | trim }} / worker: {{ ship.stdout | trim }}"
+
+- name: Launch the lane
+  hosts: fire_tf_head
+  gather_facts: false
+  vars:
+    recipe_dst: "/home/spark/glm53-tf"
+    log_dir: "/home/spark/logs/glm53-tf"
+  tasks:
+    - name: Ensure log dir
+      ansible.builtin.file:
+        path: "{{ log_dir }}"
+        state: directory
+        owner: spark
+        group: spark
+        mode: "0755"
+
+    - name: Launch (nohup; first boot on a new image key rebuilds prepared folders ~10-15 min)
+      ansible.builtin.shell: |
+        cd {{ recipe_dst }} && nohup bash -c \
+          'CONFIG=config/prod.env scripts/serve.sh start >> {{ log_dir }}/swap.log 2>&1' >/dev/null 2>&1 &
+        echo "launched pid $!"
+      register: launch
+      changed_when: true
+
+- name: Verify the lane (health, context, text smoke, vision smoke)
+  hosts: fire_tf_head
+  gather_facts: false
+  vars:
+    recipe_dst: "/home/spark/glm53-tf"
+    log_dir: "/home/spark/logs/glm53-tf"
+  tasks:
+    - name: Wait for rank 0 to serve (up to 25 min)
+      ansible.builtin.shell: |
+        for i in $(seq 1 150); do
+          if curl -sf -m3 http://127.0.0.1:8000/health >/dev/null 2>&1; then echo UP; exit 0; fi
+          sleep 10
+        done
+        echo TIMEOUT; tail -20 {{ log_dir }}/swap.log; exit 1
+      register: health_wait
+      changed_when: false
+      timeout: 1600
+
+    - name: Health payload
+      ansible.builtin.shell: curl -sf -m3 http://127.0.0.1:8000/health
+      register: health
+      changed_when: false
+
+    - name: Models endpoint (context must be 1M)
+      ansible.builtin.shell: curl -sf -m5 http://127.0.0.1:8000/v1/models
+      register: models
+      changed_when: false
+
+    - name: Assert 1M context and tensorfold owner
+      ansible.builtin.assert:
+        that:
+          - "'1048576' in models.stdout"
+          - "'tensorfold' in models.stdout"
+        fail_msg: "models payload unexpected: {{ models.stdout | truncate(200) }}"
+        success_msg: "context 1,048,576, owned_by tensorfold"
+
+    - name: Text smoke — 17*19 must return 323
+      ansible.builtin.shell: |
+        curl -sf -m60 http://127.0.0.1:8000/v1/chat/completions \
+          -H 'Content-Type: application/json' \
+          -d '{"model":"GLM-5.3-Flash-EXL3","max_tokens":200,
+               "messages":[{"role":"user","content":"17*19=? Answer with just the number."}]}' \
+          | python3 -c 'import json,sys; d=json.load(sys.stdin); m=d["choices"][0]["message"]; print(m.get("content") or m.get("reasoning"))'
+      register: text_smoke
+      changed_when: false
+
+    - name: Assert text smoke
+      ansible.builtin.assert:
+        that: "'323' in text_smoke.stdout"
+        fail_msg: "text smoke got: {{ text_smoke.stdout | truncate(200) }}"
+        success_msg: "text smoke 17*19=323 ok"
+
+    - name: Vision smoke — red + blue squares
+      ansible.builtin.shell: |
+        python3 - <<'EOF'
+        import base64, json, struct, urllib.request, zlib
+        def png(rgb, n=64):
+            raw = b"".join(b"\x00" + bytes(rgb)*n for _ in range(n))
+            def ch(t, d):
+                c = t + d
+                return struct.pack(">I", len(d)) + c + struct.pack(">I", zlib.crc32(c))
+            return (b"\x89PNG\r\n\x1a\n" + ch(b"IHDR", struct.pack(">IIBBBBB", n, n, 8, 2, 0, 0, 0))
+                    + ch(b"IDAT", zlib.compress(raw)) + ch(b"IEND", b""))
+        red = base64.b64encode(png((255,0,0))).decode()
+        blue = base64.b64encode(png((0,0,255))).decode()
+        body = json.dumps({"model": "GLM-5.3-Flash-EXL3", "max_tokens": 120, "messages": [
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{red}"}},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{blue}"}},
+                {"type": "text", "text": "Two images. First color? Second color? Format: color1, color2."},
+            ]}]}).encode()
+        req = urllib.request.Request("http://127.0.0.1:8000/v1/chat/completions", data=body,
+                                     headers={"Content-Type": "application/json"})
+        d = json.loads(urllib.request.urlopen(req, timeout=120).read())
+        m = d["choices"][0]["message"]
+        print("CONTENT:", (m.get("content") or "").replace("\n", " "))
+        print("PROMPT_TOKENS:", d.get("usage", {}).get("prompt_tokens", 0))
+        EOF
+      register: vision_smoke
+      changed_when: false
+
+    - name: Report vision smoke raw
+      ansible.builtin.debug:
+        msg: "{{ vision_smoke.stdout_lines }}"
+
+    - name: Extract prompt token count
+      ansible.builtin.set_fact:
+        vision_tokens: "{{ (vision_smoke.stdout.split('PROMPT_TOKENS: ') | last).split() | first | int + 0 }}"
+
+    - name: Assert the vision tower encoded the images
+      ansible.builtin.assert:
+        that:
+          - vision_tokens | int > 40
+          - "'red' in (vision_smoke.stdout | lower)"
+        fail_msg: >-
+          Vision not live — tower not encoding (got {{ vision_tokens }} tokens).
+          Check `docker inspect glm53-tf-r0` for GLM53_TF_VISION and the image tag.
+        success_msg: "VISION LIVE — tower encoded both images ({{ vision_tokens }} prompt tokens)"
+
+    - name: Canary line from the boot log
+      ansible.builtin.shell: grep -E '^\[canary\]' {{ log_dir }}/swap.log | tail -3
+      register: canary
+      changed_when: false
+      failed_when: false
+
+    - name: Show canary
+      ansible.builtin.debug:
+        msg: "{{ canary.stdout_lines | default(['(no canary lines yet)']) }}"
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: >-
+          glm53tf lane verified on fire: health ok, 1M context, text smoke 323,
+          vision smoke passed. API on {{ inventory_hostname }} 127.0.0.1:8000.
+          Expose via nginx proxy only if you intend LAN clients (see TF4-SCOPING.md).
