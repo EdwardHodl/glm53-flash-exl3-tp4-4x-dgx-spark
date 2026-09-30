@@ -79,9 +79,12 @@ ssh spark@spark-e116.local 'docker logs glm53-tf-r0 2>&1 | grep -i nccl | head -
 
 ```bash
 ssh spark@spark-e116.local
-cd ~/glm53-tf/scripts/rigmark && bash install.sh   # one-time; fetches the rigmark runner
-bash run.sh --base-url http://127.0.0.1:8000 --model GLM-5.3-Flash-EXL3 --name tensorfold-tp4-fire
-# receipts land in ~/glm53-tf/results/rigmark/<name>/
+cd ~/glm53-tf
+scripts/rigmark/install.sh    -- 2>&1 | head -3   # one-time; pins the rigmark CLI
+scripts/rigmark/run.sh tensorfold http://127.0.0.1:8000 GLM-5.3-Flash-EXL3
+# receipts land in ~/glm53-tf/results/rigmark/tensorfold-<stamp>/
+# (run.sh does the idle check, preflight, metadata, the standard suite, card + checksums;
+#  a caller export of EXTRA_BODY / SKIP_PREFILL / DRY_RUN wins over rigmark.env)
 ```
 
 Compare against:
