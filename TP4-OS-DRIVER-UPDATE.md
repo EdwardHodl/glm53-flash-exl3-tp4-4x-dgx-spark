@@ -12,7 +12,7 @@
 
 Driver packaging: `nvidia-driver-580-open` (Ubuntu arm64 pkg). e116 + 2ca4 are two
 releases behind (580.159.03); the target everywhere is the latest 580.178.04
-(flint's head already runs it — driver-version mismatch was flagged as cosmetic
+(580.178.04 — flint's head already runs it, verified; driver-version mismatch was flagged as cosmetic
 at flint's window; the fix is aligning the whole fleet).
 
 3ff5 is already on 24.04.5 + a 7.0.0 kernel — it rebooted into a newer kernel
