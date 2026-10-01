@@ -7,6 +7,20 @@ set at bench time, the RigMark receipt path, and the headline numbers. The ladde
 Per-stream KV cost at 7.44 KB/tok/rank (latent fp8): 384k = 2.83 GiB, 512k = 3.77 GiB.
 Reserve budget per rank: 25 GiB (OS 8 + BATCH_RESERVE 11 + session 6).
 
+### Rung 2 — 512k × 12 slots (2026-10-01 17:35 UTC)
+- **Config**: CONTEXT=524288 · GLM53_TF_BATCH=12 · KV_POOL=6,291,456 (44.63 GiB/rank) ·
+  BATCH_RESERVE_GB=6 · BATCH_ADMIT_GB=2 · HOST=127.0.0.1
+- **Receipt**: `~/glm53-tf/results/rigmark/tensorfold-20261001-173524/glm53-flash-exl3-tensorfold-tp4-bench.json`
+- **Results**: conc 1: 65.3 stream / 0.392s · conc 2: 95.1 agg / 54.5 stream ·
+  conc 4: 113.2 agg / 30.7 stream / TTFT 1.216s
+- **vs rung 1 (8×512k)**: conc 1 stream DOWN 83→65 (-22%) — at 12 slots the decode batch
+  splits rows thinner even at low concurrency; aggregate at c2/c4 unchanged (95/113).
+  Verdict: 12 slots buys nothing at ≤4 concurrent streams and costs single-stream speed.
+  8×512k is the better serving config unless real traffic exceeds 8 concurrent.
+- **Boot notes**: two failed boots before green (RESERVE 14 then 11 both starved batch
+  sizing — the sizing runs after pool pre-alloc from post-pool MemFree; RESERVE=6 gives
+  (11.5-6-2)/0.16 ≈ 21 → capped at 12). Playbook context assert widened to accept 524288.
+
 ---
 
 ## Receipt log (newest at top)
@@ -18,6 +32,9 @@ Reserve budget per rank: 25 GiB (OS 8 + BATCH_RESERVE 11 + session 6).
   (label `...-tp4-bench`, comparison `2026-10-fire-tp4-hillclimb`)
 - **Results**: conc 1: 83.2 stream / 0.303s · conc 2: 95.7 agg / 55.9 stream ·
   conc 4: 114.0 agg / 35.0 stream / TTFT 1.216s
+- **Card rows** (rigmark c5a0db01, 5/5 gates clean): CODE 96.0 tok/s (92.9–97.8) ·
+  PROSE 57.7 (56.4–60.5) · STRUCTURED 131.6 (127.3–131.9) ·
+  64K PREFILL cold 1,544 tok/s / warm replay 297,646 tok/s
 - **vs 384k×6 (run C)**: identical within noise at conc ≤4 — the doubled per-stream KV
   budget is free at bench loads. Next: rung 2 (12×512k) to see where admission knobs bite.
 - **Boot notes**: dc90 disk full again (sessions grew 4.4→23G under 384k live traffic —

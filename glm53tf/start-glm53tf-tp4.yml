@@ -294,7 +294,7 @@
       ansible.builtin.assert:
         that:
           - "'tensorfold' in models.stdout"
-          - "'393216' in models.stdout or '36864' in models.stdout"
+          - "'524288' in models.stdout or '393216' in models.stdout or '36864' in models.stdout"
         fail_msg: "models payload unexpected: {{ models.stdout | truncate(200) }}"
         success_msg: "TP4 lane serving: context 36864, owned_by tensorfold"
 
