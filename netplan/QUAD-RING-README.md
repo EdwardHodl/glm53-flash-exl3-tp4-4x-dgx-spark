@@ -13,10 +13,10 @@ Ring order: **e116 (rank 0) → dc90 (rank 1) → 3ff5 (rank 2) → 2ca4 (rank 3
 
 | edge | end A | end B | subnet | status at probe time |
 |---|---|---|---|---|
-| A | e116 `enp1s0f0np0` `4c:bb:47:2b:e1:17` | dc90 `enP2p1s0f1np1` `30:c5:99:bf:dc:96` | 10.10.1.0/24 | UP, ping OK (1472) |
-| B | dc90 `enp1s0f0np0` `30:c5:99:bf:dc:91` | 3ff5 `enp1s0f1np1` `4c:bb:47:2a:3f:f7` | 10.10.3.0/24 (new) | UP, ping OK (1472), proven with temp IPs |
-| C | 3ff5 `enp1s0f0np0` `4c:bb:47:2a:3f:f6` | 2ca4 `enp1s0f1np1` `30:c5:99:bd:2c:a6` | 10.10.2.0/24 | UP, 4054-byte jumbo OK |
-| D | 2ca4 `enp1s0f0np0` `30:c5:99:bd:2c:a5` | e116 `enp1s0f1np1` `4c:bb:47:2b:e1:18` | 10.10.0.0/24 | UP, 4054-byte jumbo OK |
+| A | e116 `enp1s0f0np0` | dc90 `enP2p1s0f1np1` | 10.10.1.0/24 | UP, ping OK (1472) |
+| B | dc90 `enp1s0f0np0` | 3ff5 `enp1s0f1np1` | 10.10.3.0/24 (new) | UP, ping OK (1472), proven with temp IPs |
+| C | 3ff5 `enp1s0f0np0` | 2ca4 `enp1s0f1np1` | 10.10.2.0/24 | UP, 4054-byte jumbo OK |
+| D | 2ca4 `enp1s0f0np0` | e116 `enp1s0f1np1` | 10.10.0.0/24 | UP, 4054-byte jumbo OK |
 
 Final addressing (last octet = rank + 1, alexellis convention):
 
@@ -43,13 +43,17 @@ dc90's previous (deepseek-era) netplan already addressed. Keep it: the cable is 
 
 ## Wiring cheatsheet for the next probe
 
+Peer MACs scrubbed from the public repo (map kept in the ops memory backup,
+`memory/backup/fire-quad-mac-map-*.md`). Resolve at runtime with
+`ip link show <iface>` on the peer or `ip neigh show dev <iface>`.
+
 | node | port | peer MAC to expect | peer host |
 |---|---|---|---|
-| e116 f0 | `enp1s0f0np0` | `30:c5:99:bf:dc:96` | dc90 P2f1 |
-| e116 f1 | `enp1s0f1np1` | `30:c5:99:bd:2c:a5` | 2ca4 f0 |
-| dc90 f0 | `enp1s0f0np0` | `4c:bb:47:2a:3f:f7` | 3ff5 f1 |
-| dc90 P2f1 | `enP2p1s0f1np1` | `4c:bb:47:2b:e1:17` | e116 f0 |
-| 3ff5 f0 | `enp1s0f0np0` | `30:c5:99:bd:2c:a6` | 2ca4 f1 |
-| 3ff5 f1 | `enp1s0f1np1` | `30:c5:99:bf:dc:91` | dc90 f0 |
-| 2ca4 f0 | `enp1s0f0np0` | `4c:bb:47:2b:e1:18` | e116 f1 |
-| 2ca4 f1 | `enp1s0f1np1` | `4c:bb:47:2a:3f:f6` | 3ff5 f0 |
+| e116 f0 | `enp1s0f0np0` | `<see backup>` | dc90 P2f1 |
+| e116 f1 | `enp1s0f1np1` | `<see backup>` | 2ca4 f0 |
+| dc90 f0 | `enp1s0f0np0` | `<see backup>` | 3ff5 f1 |
+| dc90 P2f1 | `enP2p1s0f1np1` | `<see backup>` | e116 f0 |
+| 3ff5 f0 | `enp1s0f0np0` | `<see backup>` | 2ca4 f1 |
+| 3ff5 f1 | `enp1s0f1np1` | `<see backup>` | dc90 f0 |
+| 2ca4 f0 | `enp1s0f0np0` | `<see backup>` | e116 f1 |
+| 2ca4 f1 | `enp1s0f1np1` | `<see backup>` | 3ff5 f0 |
