@@ -33,6 +33,11 @@
 | 29 | 04:36 | text smoke (60s) | **LANE SERVING, all 4 ranks booted** — but chat completions hang: my `_share` rank0-early-return desynced the collective (non-rank0 ranks block in all_gather forever). Proper fix: first gather (safe, numel 1) yields count; if count==0 ALL ranks skip the second gather | restructured _share in engine-fix.py: rank0-only shortcut removed, count==0 skip on all ranks | in progress — run 30 |
 | 30 | 04:44 | ✅ **NONE — PLAYBOOK GREEN** | 0 failed across all 4 hosts; "text smoke 17*19=323 ok"; serving banner; 600s smoke timeout was the last codified fix | — | **SUCCESS — lane serving on :8888** |
 
+## RigMark benchmark (2026-10-01, post-serving)
+- Run A (14:51 UTC): decode rows excellent (**97-100 tok/s decode, TTFT 0.30-0.34s**), prefill rows excellent (cold ~1578-1581 tok/s at 16k-33k; warm replay 170k tok/s = cached). **Aborted at prefill/65536: HTTP 400** — context_length_exceeded, because CONTEXT=36864 (TP4-LESSONS boot constraint) < RigMark's 65536 prefill stage. Partial receipt kept.
+- Run B (14:52 UTC): relaunched with SKIP_PREFILL=1, same comparison ID — decode rows again 97-100 tok/s / TTFT ~0.3s. Awaiting completion; receipt will carry a prefill-mismatch note.
+- Numbers to cite once complete: **~97-100 tok/s single-stream decode @ TP=4**, TTFT ~0.3s. (For context: the retired NVFP4 alexellis lane measured 27.1 tok/s; LIL EXL3 lane 39.3 tok/s — both single-node-pair lanes.)
+
 ## Codified into the playbook (per user request 2026-10-01)
 1. **root-ssh task**: installs shared key for root, writes /root/.ssh/config covering mgmt + ring IPs, verifies all 3 workers authenticate — runs every start.
 2. **scripts-to-workers task**: copies recipe scripts (incl. prepare-main.sh) to all workers so container bind-mounts always get a real file. NOTE (run 15): the serve-tp4.sh rsync happens only in the head play — workers ALSO need it; manual scp 2026-10-01, and `Sync recipe scripts to the workers` now covers it going forward.

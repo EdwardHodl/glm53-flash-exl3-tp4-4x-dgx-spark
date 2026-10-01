@@ -70,9 +70,16 @@ Also on the 384K boot:
 
 ## How to change it
 
+Context is an **environment** override — the recipe declares no parameters, so the
+argument form `just lilquad-up LIL_MAX_MODEL_LEN=393216` does NOT work (just reads it as a
+recipe name and errors). Use the env-prefix form:
+
 ```
-just lilquad-up LIL_MAX_MODEL_LEN=393216          # applied
-just lilquad-up LIL_MAX_MODEL_LEN=524288          # 512K, costs 2 streams
-just lilquad-up LIL_MAX_MODEL_LEN=1048576         # 1M native, costs 5 streams
+LIL_MAX_MODEL_LEN=393216 just lilquad-up          # 384K (applied 2026-09-27 and again 2026-09-28)
+LIL_MAX_MODEL_LEN=524288 just lilquad-up          # 512K, costs 2 streams
+LIL_MAX_MODEL_LEN=1048576 just lilquad-up         # 1M native, costs 5 streams
 just lilquad-up                                   # default 262144
 ```
+
+Confirm what actually came up rather than trusting the invocation — check the launcher
+echo lines (`ctx=...`) and `/v1/models` `max_model_len`.

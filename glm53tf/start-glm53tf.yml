@@ -23,18 +23,14 @@
       ansible.builtin.debug:
         msg: "{{ inventory_hostname }} MemFree {{ memfree.stdout }} GiB"
 
-    - name: Disk audit — warn at 90 percent, abort at 95 (no /tmp means no ansible)
+    - name: Disk audit — informational only (gate removed by user request 2026-10-01)
       ansible.builtin.shell: df -BG / --output=pcent | tail -1 | tr -dc '0-9'
       register: diskpct
       changed_when: false
 
-    - name: Abort when disk is critical
-      ansible.builtin.assert:
-        that: diskpct.stdout | int < 95
-        fail_msg: >-
-          {{ inventory_hostname }} root {{ diskpct.stdout }} percent — prune first
-          (see TF4-SCOPING.md section 5 phase 1)
-        success_msg: "{{ inventory_hostname }} root {{ diskpct.stdout }} percent used"
+    - name: Report disk usage
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} root {{ diskpct.stdout }} percent used"
 
     - name: GPU state (informational — the LIL lane is expected to be up on ring ranks)
       ansible.builtin.shell: nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader | head -3
