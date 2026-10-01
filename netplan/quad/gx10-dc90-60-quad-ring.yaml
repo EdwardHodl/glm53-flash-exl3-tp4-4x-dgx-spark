@@ -1,15 +1,19 @@
-# gx10-dc90.local — fire-quad ring fabric (MAC-verified 2026-09-25)
+# gx10-dc90.local — fire-quad ring fabric v2 (2026-10-01)
 # rank 1 | edge B: f0  = 10.10.3.1/24 -> 3ff5 enp1s0f1np1   (10.10.3.2)
 #          edge A: P2f1 = 10.10.1.2/24 -> e116 enp1s0f0np0 (10.10.1.1)
-# NOTE: edge A lands on enP2p1s0f1np1 — the second PCIe view of cage P2 (existing
-# deepseek-era netplan already addressed this port; keep it).
-# REPLACES the old 10.10.0.2/24 on enp1s0f1np1 (duplicated 2ca4's address).
-# Deploy to /etc/netplan/60-quad-ring.yaml (and REMOVE the old 40/50-cx7 file that
-# holds 10.10.0.2 + 10.10.1.2), then: sudo netplan apply
+# NOTE: edge A lands on enP2p1s0f1np1 — the second PCIe view of cage P2. The cable
+# is what it is (MAC-verified 2026-09-25): keep this name, do NOT "fix" it to f1.
+# REPLACES the old 10.10.0.2/24 on enp1s0f1np1 (was duplicating 2ca4's address —
+# the ARP-flap fault from the first probe; REMOVE any old 40/50-cx7 netplan file
+# holding 10.10.0.2 or 10.10.1.2 when deploying).
+# RoCE device map (netdev <-> HCA pairing, for NCCL_IB_HCA / GID checks):
+#   enp1s0f0np0 <-> rocep1s0f0 | enP2p1s0f1np1 <-> roceP2p1s0f1
+#   unused views (MTU 9000, no address): enp1s0f1np1 (rocep1s0f1), enP2p1s0f0np0 (roceP2p1s0f0)
 network:
   version: 2
   ethernets:
     enp1s0f0np0:
+      dhcp4: false
       mtu: 9000
       addresses:
         - 10.10.3.1/24
@@ -17,16 +21,18 @@ network:
         addresses: []
       optional: true
     enP2p1s0f1np1:
+      dhcp4: false
       mtu: 9000
       addresses:
         - 10.10.1.2/24
       nameservers:
         addresses: []
       optional: true
-    # second views: MTU 9000, no address
     enp1s0f1np1:
+      dhcp4: false
       mtu: 9000
       optional: true
     enP2p1s0f0np0:
+      dhcp4: false
       mtu: 9000
       optional: true

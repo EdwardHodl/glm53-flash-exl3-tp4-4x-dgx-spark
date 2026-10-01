@@ -326,3 +326,66 @@ glm53tf-progress:
 # asserts GPUs idle, apt upgrade, reboot workers first, verify drivers; then the head
 tp4-update:
 	ansible-playbook -i hosts glm53tf/update-reboot.yml
+
+# ══ TensorFold TP=4 lane on the fire quad (fork 0900; glm53-tensorfold:tp4) ══
+# The ONLY entrypoint for launch + monitoring of this lane (user directive).
+# Ring: e116 r0 (API :8000) → dc90 r1 → 3ff5 r2 → 2ca4 r3.
+# Boot context 36864 (see TP4-LESSONS.md #9: 1M OOMKills rank 0 at graph capture).
+# LIL lane must be DOWN (GB10 unified memory is shared).
+TF4_PLAY := "glm53tf/start-glm53tf-tp4.yml"
+
+# tf4-fabric: re-apply the switchless ring fabric (MTU 9000, GID-3, DOCKER-USER,
+# compaction=0) — RUN after every reboot and after docker churn. Optional node arg.
+tf4-fabric *ARGS="":
+	bash quad-launcher/tf4-fabric.sh {{ARGS}}
+
+# tf4-stage: sync recipe + config, verify 92 shards + drafter, build/ship image.
+tf4-stage:
+	ansible-playbook -i hosts {{TF4_PLAY}} --tags stage
+
+# tf4-prepare: per-rank prepared folders on all 4 nodes (GPU work, ~6 min each).
+tf4-prepare:
+	ansible-playbook -i hosts {{TF4_PLAY}} --tags prepare
+
+# tf4-up: full lane (stage → prepare → launch → health + smoke). ~35 min cold.
+tf4-up:
+	ansible-playbook -i hosts {{TF4_PLAY}}
+
+# tf4-down: remove all four rank containers, assert GPUs released.
+tf4-down:
+	for h in 192.168.1.6 192.168.1.2 192.168.1.28 192.168.1.31; do \
+	  ssh -o BatchMode=yes -i /home/flowai/.ssh/spark_agent_key spark@$$h \
+	    'docker rm -f glm53-tf-r0 glm53-tf-r1 glm53-tf-r2 glm53-tf-r3 2>/dev/null || true; \
+	     test -z "$$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | tr -d " ")" && echo "$$h: GPU idle" || echo "$$h: GPU STILL BUSY"'; \
+	done
+
+# tf4-status: whole-system view (containers + load phase per rank). --once default.
+tf4-status:
+	bash quad-launcher/tp4-tf-view.sh --once
+
+# tf4-log N: follow rank N's container log (pull straight off the host).
+tf4-log RANK="0":
+	#!/usr/bin/env bash
+	set -euo pipefail
+	case {{RANK}} in
+	  0) h=192.168.1.6 ;; 1) h=192.168.1.2 ;; 2) h=192.168.1.28 ;; 3) h=192.168.1.31 ;;
+	  *) echo "rank must be 0-3"; exit 2 ;;
+	esac
+	exec ssh -o BatchMode=yes -i /home/flowai/.ssh/spark_agent_key spark@$h \
+	  "docker logs -f --tail 40 glm53-tf-r{{RANK}}"
+
+# tf4-logs: 4-column live tails of all ranks (frozen banner with API health).
+tf4-logs *ARGS="":
+	bash quad-launcher/tp4-tf-view.sh {{ARGS}}
+
+# tf4-test: health + models + 17*19 smoke on the rank-0 API (e116:8000).
+tf4-test:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	base="http://192.168.1.6:8000"
+	curl -s -o /dev/null -w 'health => HTTP %{http_code}\n' -m 5 "$base/health" || true
+	curl -s -m 10 "$base/v1/models" | python3 -m json.tool | head -12 || true
+	curl -s -m 120 "$base/v1/chat/completions" -H "Content-Type: application/json" -d '{
+	  "model": "GLM-5.3-Flash-EXL3", "max_tokens": 200, "temperature": 0,
+	  "messages": [{"role":"user","content":"17*19=? Answer with just the number."}]
+	}' | python3 -c 'import json,sys; d=json.load(sys.stdin); m=d["choices"][0]["message"]; print("smoke:", (m.get("content") or m.get("reasoning") or "").strip()[-40:])' || true

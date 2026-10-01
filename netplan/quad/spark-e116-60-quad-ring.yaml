@@ -1,12 +1,17 @@
-# spark-e116.local — fire-quad ring fabric (MAC-verified 2026-09-25)
+# spark-e116.local — fire-quad ring fabric v2 (2026-10-01)
 # rank 0 | edge A: f0 = 10.10.1.1/24 -> dc90 enP2p1s0f1np1 (10.10.1.2)
 #          edge D: f1 = 10.10.0.1/24 -> 2ca4 enp1s0f0np0  (10.10.0.3)
-# Deploy to /etc/netplan/60-quad-ring.yaml, then: sudo netplan apply
-# Target MTU 9000 (was 4092) — apply on all 4 nodes in one window.
+# Deploy to /etc/netplan/60-quad-ring.yaml (root:root 600), then: sudo netplan apply
+# MTU 9000 is mandatory on both rails: 1500 = ~2.7x slower all-reduce, SILENT
+# (glm53flash/glm-5.3-flash-4x-dgx-spark-switchless/docs/fabric.md gotcha 1).
+# Runtime state (ip_forward, DOCKER-USER accept, GID-3 checks) is applied by
+# quad-launcher/tf4-fabric.sh — netplan persists L2/L3 only. Re-run tf4-fabric.sh
+# after EVERY reboot and after any docker up/down churn.
 network:
   version: 2
   ethernets:
     enp1s0f0np0:
+      dhcp4: false
       mtu: 9000
       addresses:
         - 10.10.1.1/24
@@ -14,6 +19,7 @@ network:
         addresses: []
       optional: true
     enp1s0f1np1:
+      dhcp4: false
       mtu: 9000
       addresses:
         - 10.10.0.1/24

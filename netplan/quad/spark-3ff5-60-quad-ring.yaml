@@ -1,12 +1,16 @@
-# spark-3ff5.local — fire-quad ring fabric (MAC-verified 2026-09-25)
+# spark-3ff5.local — fire-quad ring fabric v2 (2026-10-01)
 # rank 2 | edge C: f0 = 10.10.2.3/24 -> 2ca4 enp1s0f1np1 (10.10.2.4)
 #          edge B: f1 = 10.10.3.2/24 -> dc90 enp1s0f0np0 (10.10.3.1)
-# Deploy to /etc/netplan/60-quad-ring.yaml, then: sudo netplan apply
-# (keep any existing older fabric file consistent — f1 moves 10.10.1.3 -> 10.10.3.2)
+# Deploy to /etc/netplan/60-quad-ring.yaml (root:root 600), then: sudo netplan apply
+# (f1 moves 10.10.1.3 -> 10.10.3.2 vs the triangle-era plan; REMOVE any old
+# 40/50-qfsp file still holding 10.10.1.3.)
+# RoCE device map: enp1s0f0np0 <-> rocep1s0f0 | enp1s0f1np1 <-> rocep1s0f1
+#   unused view (MTU 9000, no address): enP2p1s0f1np1 (roceP2p1s0f1)
 network:
   version: 2
   ethernets:
     enp1s0f0np0:
+      dhcp4: false
       mtu: 9000
       addresses:
         - 10.10.2.3/24
@@ -14,9 +18,14 @@ network:
         addresses: []
       optional: true
     enp1s0f1np1:
+      dhcp4: false
       mtu: 9000
       addresses:
         - 10.10.3.2/24
       nameservers:
         addresses: []
+      optional: true
+    enP2p1s0f1np1:
+      dhcp4: false
+      mtu: 9000
       optional: true

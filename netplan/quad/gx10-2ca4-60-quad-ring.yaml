@@ -1,13 +1,16 @@
-# gx10-2ca4.local — fire-quad ring fabric (MAC-verified 2026-09-25)
+# gx10-2ca4.local — fire-quad ring fabric v2 (2026-10-01)
 # rank 3 | edge D: f0 = 10.10.0.3/24 -> e116 enp1s0f1np1 (10.10.0.1)
 #          edge C: f1 = 10.10.2.4/24 -> 3ff5 enp1s0f0np0 (10.10.2.3)
-# Deploy to /etc/netplan/60-quad-ring.yaml (supersedes the fire-triangle
-# 50-qfsp file — f0 moves 10.10.0.2 -> 10.10.0.3, f1 moves 10.10.2.2 -> 10.10.2.4),
-# then: sudo netplan apply
+# Deploy to /etc/netplan/60-quad-ring.yaml (root:root 600), then: sudo netplan apply
+# Supersedes the fire-triangle 50-qfsp file (f0 moved 10.10.0.2 -> 10.10.0.3,
+# f1 moved 10.10.2.2 -> 10.10.2.4 — REMOVE that old file when deploying).
+# RoCE device map: enp1s0f0np0 <-> rocep1s0f0 | enp1s0f1np1 <-> rocep1s0f1
+#   unused view (MTU 9000, no address): enP2p1s0f1np1 (roceP2p1s0f1)
 network:
   version: 2
   ethernets:
     enp1s0f0np0:
+      dhcp4: false
       mtu: 9000
       addresses:
         - 10.10.0.3/24
@@ -15,9 +18,14 @@ network:
         addresses: []
       optional: true
     enp1s0f1np1:
+      dhcp4: false
       mtu: 9000
       addresses:
         - 10.10.2.4/24
       nameservers:
         addresses: []
+      optional: true
+    enP2p1s0f1np1:
+      dhcp4: false
+      mtu: 9000
       optional: true
