@@ -13,6 +13,11 @@ Reserve budget per rank: 25 GiB (OS 8 + BATCH_RESERVE 11 + session 6).
 - **Receipt**: `~/glm53-tf/results/rigmark/tensorfold-20261001-173524/glm53-flash-exl3-tensorfold-tp4-bench.json`
 - **Results**: conc 1: 65.3 stream / 0.392s · conc 2: 95.1 agg / 54.5 stream ·
   conc 4: 113.2 agg / 30.7 stream / TTFT 1.216s
+- **Card rows** (5/5 gates clean): CODE 95.5 (91.5–99.2) · PROSE 57.1 (55.9–60.6) ·
+  STRUCTURED 129.0 (126.8–129.9) · 64K PREFILL cold 78,234 tok/s (page-cache hot) /
+  replay 241,609 — compare rung 1's 1,544 cold (true NVMe): rung 2's "cold" hit page
+  cache, so prefill numbers between rungs aren't comparable; use run B/C's 1,545-1,568
+  as the honest NVMe figure.
 - **vs rung 1 (8×512k)**: conc 1 stream DOWN 83→65 (-22%) — at 12 slots the decode batch
   splits rows thinner even at low concurrency; aggregate at c2/c4 unchanged (95/113).
   Verdict: 12 slots buys nothing at ≤4 concurrent streams and costs single-stream speed.
