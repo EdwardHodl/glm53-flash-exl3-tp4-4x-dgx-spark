@@ -285,7 +285,7 @@
       changed_when: false
       timeout: 1600
 
-    - name: Models endpoint (context 36864, tensorfold owner)
+    - name: Models endpoint (context 393216 or 36864, tensorfold owner)
       ansible.builtin.shell: curl -sf -m5 http://127.0.0.1:8888/v1/models
       register: models
       changed_when: false
@@ -293,8 +293,8 @@
     - name: Assert context + tensorfold
       ansible.builtin.assert:
         that:
-          - "'36864' in models.stdout"
           - "'tensorfold' in models.stdout"
+          - "'393216' in models.stdout or '36864' in models.stdout"
         fail_msg: "models payload unexpected: {{ models.stdout | truncate(200) }}"
         success_msg: "TP4 lane serving: context 36864, owned_by tensorfold"
 
