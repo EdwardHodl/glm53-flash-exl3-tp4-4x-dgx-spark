@@ -1,0 +1,46 @@
+# TP4 Hill-Climb Ladder — Benchmark Receipts
+
+Purpose: one row per benched configuration. Each row records the config knobs actually
+set at bench time, the RigMark receipt path, and the headline numbers. The ladder is
+6 → 8 → 12 → 16 slots at 384k/512k context; the goal is 16 @ 512k.
+
+Per-stream KV cost at 7.44 KB/tok/rank (latent fp8): 384k = 2.83 GiB, 512k = 3.77 GiB.
+Reserve budget per rank: 25 GiB (OS 8 + BATCH_RESERVE 11 + session 6).
+
+---
+
+## Receipt log (newest at top)
+
+### Rung 0 — baseline re-bench (2026-10-01, pre-ladder)
+- **Config**: CONTEXT=393216 (384k) · GLM53_TF_BATCH=6 · KV_POOL=2,359,296 (16.74 GiB/rank)
+  BATCH_RESERVE_GB=11 · BATCH_PIECE=2048 · MAX_DRAFT_ROWS=16 · IMAGE=glm53-tensorfold:tp4
+- **Bind**: 127.0.0.1:8888 (proxy :8889 torn down for the window)
+- **Receipt**: _see run C (below) — this bench re-validates the same config after the
+  hill-climb tooling landed; skip unless numbers diverge >5%._
+- **Status**: superseded by receipt tensorfold-20261001-153725; not re-run (config unchanged).
+
+### Run C — 384k × 6 slots (2026-10-01 15:37 UTC)
+- **Config**: CONTEXT=393216 · BATCH=6 · KV_POOL=2,359,296 (16.74 GiB/rank) · commit 477f331
+- **Receipt**: `~/glm53-tf/results/rigmark/tensorfold-20261001-153725/glm53-flash-exl3-tensorfold-tp4-384k-6slot.json`
+- **Results**: conc 1: 83.3 stream / TTFT 0.315s · conc 2: 94.8 agg / 51.7 stream ·
+  conc 4: 110.3 agg / 31.8 stream / TTFT 1.225s
+- **Prefill (now passing at 384k)**: cold 1568 tok/s @ 33k, 1545 tok/s @ 65k; warm 173k/294k (cached)
+
+### Run B — 36k × 4 slots (2026-10-01 14:52 UTC)
+- **Config**: CONTEXT=36864 · BATCH=4 · KV_POOL=36864 · commit a46dc04 era
+- **Receipt**: `~/glm53-tf/results/rigmark/tensorfold-20261001-145922/`
+- **Results**: conc 1: 84.7 stream / 0.302s · conc 2: 99.9 agg / 56.4 stream ·
+  conc 4: 113.5 agg / 32.6 stream / TTFT 1.042s
+- **Note**: SKIP_PREFILL=1 (65k stage > 36k context → HTTP 400 in run A at 14:51)
+
+---
+
+## Ladder plan (each rung: bounce → bench → receipt row here)
+
+| Rung | CONTEXT | BATCH | KV_POOL | KV GiB/rank | Admission knob change | Status |
+|---|---|---|---|---|---|---|
+| 8×512k | 524288 | 8 | 4,194,304 | 31.8 | BATCH_RESERVE_GB 11→13 | pending |
+| 12×512k | 524288 | 12 | 6,291,456 | 47.7 | BATCH_ADMIT_GB 2→3, RESERVE→14 | pending |
+| 16×512k | 524288 | 16 | 8,388,608 | 63.6 | RESERVE→16, watch MAX_DRAFT_ROWS=16 ceiling | pending |
+
+Rollback at any rung: previous config is one git revert + bounce away.
