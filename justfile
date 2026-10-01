@@ -401,7 +401,7 @@ tf4-test:
 	  "messages": [{"role":"user","content":"17*19=? Answer with just the number."}]
 	}' | python3 -c 'import json,sys; d=json.load(sys.stdin); m=d["choices"][0]["message"]; print("smoke:", (m.get("content") or m.get("reasoning") or "").strip()[-40:])' || true
 
-# tf4-host: publish the lane on the LAN via a socat proxy (0.0.0.0:8889 on e116
+# tf4-host: publish the lane on the LAN via a socat proxy (192.168.1.6:8888 on e116 (client contract)
 # -> 127.0.0.1:8888). The engine stays private; the proxy is the publish point and
 # survives lane bounces. Verifies health + 17*19 smoke through the proxy from
 # flowai (off-node) BEFORE declaring hosted. Idempotent.
@@ -433,9 +433,9 @@ tf4-bench *ARGS="":
 tf4-notice:
 	#!/usr/bin/env bash
 	pid=$(ssh -o BatchMode=yes -i /home/flowai/.ssh/spark_agent_key spark@192.168.1.6 \
-	  "pgrep -f socat -a 2>/dev/null | grep 'TCP-LISTEN:8889' | grep -v pgrep | awk '{print \$1}' | head -1" 2>/dev/null || true)
+	  "pgrep -f socat -a 2>/dev/null | grep 'TCP-LISTEN:8888,bind=192.168.1.6' | grep -v pgrep | awk '{print \$1}' | head -1" 2>/dev/null || true)
 	if [[ -n "$pid" ]]; then
-	  echo ">> NOTICE: publish proxy RUNNING (pid $pid) — LAN clients on http://192.168.1.6:8889/v1"
+	  echo ">> NOTICE: publish proxy RUNNING (pid $pid) — LAN clients on http://spark-e116.local:8888/v1"
 	  echo ">>        External requests WILL hit the lane. For a clean bench: just tf4-unhost"
 	else
 	  echo ">> NOTICE: publish proxy NOT running — engine is private (bench-safe)."

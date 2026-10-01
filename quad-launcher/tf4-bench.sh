@@ -22,13 +22,13 @@ if [[ "$bind" != "HOST=127.0.0.1" ]]; then
 fi
 
 # 3. kill any publish proxy — zero external requests during the window
-pid=$($SSH "pgrep -f socat -a 2>/dev/null | grep 'TCP-LISTEN:8889' | grep -v pgrep | awk '{print \$1}' | head -1" 2>/dev/null || true)
+pid=$($SSH "pgrep -f socat -a 2>/dev/null | grep 'TCP-LISTEN:8888,bind=192.168.1.6' | grep -v pgrep | awk '{print \$1}' | head -1" 2>/dev/null || true)
 if [[ -n "$pid" ]]; then
   echo "Tearing down publish proxy (pid $pid)..."
   $SSH "kill $pid" 2>/dev/null || true
   sleep 1
 fi
-pid2=$($SSH "pgrep -f socat -a 2>/dev/null | grep 'TCP-LISTEN:8889' | grep -v pgrep | awk '{print \$1}' | head -1" 2>/dev/null || true)
+pid2=$($SSH "pgrep -f socat -a 2>/dev/null | grep 'TCP-LISTEN:8888,bind=192.168.1.6' | grep -v pgrep | awk '{print \$1}' | head -1" 2>/dev/null || true)
 [[ -z "$pid2" ]] || { echo "PROXY STILL RUNNING (pid $pid2) — aborting to avoid contamination"; exit 1; }
 # verify LAN endpoint is actually closed
 lan_code=$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://$HEAD:8888/health" 2>/dev/null) || lan_code="000"
