@@ -305,9 +305,9 @@ lilquad-test:
 # The LIL lane must be DOWN on both pair nodes (GB10 unified memory) — run
 # `just lilquad-down` first if it is up, or accept the preflight abort.
 
-# Stage + launch + verify the TensorFold lane (playbook does everything)
+# Stage + launch + verify the TensorFold TP=4 lane (playbook does everything)
 start-glm53tf:
-	ansible-playbook -i hosts glm53tf/start-glm53tf.yml
+	ansible-playbook -i hosts {{TF4_PLAY}}
 
 # Stop the TensorFold lane, assert containers + GPU released
 stop-glm53tf:
@@ -378,14 +378,48 @@ tf4-log RANK="0":
 tf4-logs *ARGS="":
 	bash quad-launcher/tp4-tf-view.sh {{ARGS}}
 
-# tf4-test: health + models + 17*19 smoke on the rank-0 API (e116:8000).
+# tf4-send: consistent QFSP file transfer between nodes (prefers the direct ring
+# edge when the pair is cabled, falls back to mgmt LAN; verifies size on receipt).
+#   just tf4-send e116 dc90 /home/spark/tp4-ship.tar
+#   just tf4-send all 2ca4 /home/spark/notes.md      (fan-in from every node)
+tf4-send *ARGS:
+	bash quad-launcher/qfsp-send.sh {{ARGS}}
+
+# tf4-test: health + models + 17*19 smoke on the rank-0 API (e116:8888 LAN).
 tf4-test:
 	#!/usr/bin/env bash
 	set -euo pipefail
-	base="http://192.168.1.6:8000"
+	base="http://192.168.1.6:8888"
 	curl -s -o /dev/null -w 'health => HTTP %{http_code}\n' -m 5 "$base/health" || true
 	curl -s -m 10 "$base/v1/models" | python3 -m json.tool | head -12 || true
 	curl -s -m 120 "$base/v1/chat/completions" -H "Content-Type: application/json" -d '{
 	  "model": "GLM-5.3-Flash-EXL3", "max_tokens": 200, "temperature": 0,
 	  "messages": [{"role":"user","content":"17*19=? Answer with just the number."}]
 	}' | python3 -c 'import json,sys; d=json.load(sys.stdin); m=d["choices"][0]["message"]; print("smoke:", (m.get("content") or m.get("reasoning") or "").strip()[-40:])' || true
+
+# tf4-host: publish the TP4 lane on the LAN (0.0.0.0:8888 on e116) — for overnight
+# benchmarking or external clients. Verifies from flowai (off-node) that the LAN
+# endpoint answers health + a live generation BEFORE declaring it hosted; idempotent
+# (safe to re-run; hosting is just the engine's bind, no proxy process involved).
+# Requires the lane already serving (just start-glm53tf) — aborts if not.
+tf4-host:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	lan="http://192.168.1.6:8888"
+	# 1. lane must be up on the head (loopback from e116)
+	up=$(ssh -o BatchMode=yes -i /home/flowai/.ssh/spark_agent_key spark@192.168.1.6 \
+	      'curl -s -m5 -o /dev/null -w %{http_code} http://127.0.0.1:8888/health || true')
+	[[ "$up" == "200" ]] || { echo "lane not serving on e116 (loopback health=$up) — run: just start-glm53tf"; exit 1; }
+	# 2. bind check: HOST must be 0.0.0.0 in the installed config
+	bind=$(ssh -o BatchMode=yes spark@192.168.1.6 'grep -E "^HOST=" ~/glm53-tf/config/prod-tp4.env || true')
+	[[ "$bind" == "HOST=0.0.0.0" ]] || { echo "config bind is '$bind' — set HOST=0.0.0.0 and restart the lane first"; exit 1; }
+	# 3. LAN verify from this machine (off-node): health + live generation
+	code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$lan/health")
+	[[ "$code" == "200" ]] || { echo "LAN health failed (HTTP $code)"; exit 1; }
+	ans=$(curl -s -m 300 "$lan/v1/chat/completions" -H "Content-Type: application/json" -d '{
+	  "model": "GLM-5.3-Flash-EXL3", "max_tokens": 40, "temperature": 0,
+	  "messages": [{"role":"user","content":"17*19=? Answer with just the number."}]
+	}' | python3 -c 'import json,sys; d=json.load(sys.stdin); m=d["choices"][0]["message"]; print((m.get("content") or "").strip())')
+	echo "LAN smoke: $ans"
+	[[ "$ans" == *323* ]] || { echo "LAN smoke WRONG ANSWER: $ans"; exit 1; }
+	echo "HOSTED: TP4 lane live on http://192.168.1.6:8888/v1 (LAN, verified smoke 17*19=323)"
