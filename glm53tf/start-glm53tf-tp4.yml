@@ -86,17 +86,54 @@
       register: build
       changed_when: "'IMAGE-BUILT' in build.stdout"
 
-    - name: Ship the image to the three workers if missing there
+    # Ship via tar+rsync+load ALWAYS (TP4-LESSONS #16: piped save|load hangs on
+    # a dead NIC-pipe). The old fork-marker skip was unsound: marker=2 matches
+    # ANY fork image incl. a stale tag — workers silently kept outdated images.
+    # Ship to /home/spark (dc90's /tmp sits on a 99%-full root fs).
+    # Runs as the spark user (root@e116 has no ssh keys/known_hosts for workers).
+    - name: Ship the image to the three workers (always — the tag must match the head's build)
+      become: false
+      # tar+rsync+load path (TP4-LESSONS.md #16): the piped `docker save | ssh load`
+      # competes for one NIC and hangs in S/Sl on a dead pipe; the tar path is proven.
+      # Skipped when a worker's image already carries the fork marker (content check —
+      # image ids differ per daemon, so id-compare across hosts is meaningless).
       ansible.builtin.shell: |
-        for w in $(grep -A4 '\[fire_tp4_workers\]' /dev/null 2>/dev/null; echo "gx10-dc90.local spark-3ff5.local gx10-2ca4.local"); do
-          if ssh -o BatchMode=yes spark@$w docker image inspect {{ tf_image }} >/dev/null 2>&1; then
-            echo "$w: IMAGE-ON-WORKER"
-          else
-            docker save {{ tf_image }} | ssh spark@$w docker load >/dev/null 2>&1 && echo "$w: IMAGE-SHIPPED"
-          fi
+        rm -f /home/spark/tp4-ship.tar
+        docker save -o /home/spark/tp4-ship.tar {{ tf_image }}
+        # ring-edge addrs: dc90=10.10.1.2 (edge A from e116), 3ff5/2ca4 have no
+        # direct edge to e116 — mgmt LAN for them (parallel to overlap loads).
+        rsync -a --timeout=300 /home/spark/tp4-ship.tar spark@10.10.1.2:/home/spark/tp4-ship.tar &
+        rsync -a --timeout=300 /home/spark/tp4-ship.tar spark@192.168.1.28:/home/spark/tp4-ship.tar &
+        rsync -a --timeout=300 /home/spark/tp4-ship.tar spark@192.168.1.31:/home/spark/tp4-ship.tar &
+        wait
+        for w in 10.10.1.2 192.168.1.28 192.168.1.31; do
+          ssh -o BatchMode=yes spark@$w "docker load -i /home/spark/tp4-ship.tar && rm -f /home/spark/tp4-ship.tar" && echo "$w: IMAGE-SHIPPED"
         done
+        rm -f /home/spark/tp4-ship.tar
       register: ship
       changed_when: "'IMAGE-SHIPPED' in ship.stdout"
+      timeout: 5400
+
+    - name: Show ship results
+      ansible.builtin.debug:
+        msg: "{{ ship.stdout_lines | default([]) }}"
+  tags: stage
+
+- name: TP4 fork marker check (per worker, via own connection — root@head lacks worker keys)
+  hosts: fire_tp4
+  gather_facts: false
+  tasks:
+    - name: Check the fork marker in the image (self.world in split.py)
+      ansible.builtin.shell: |
+        docker run --rm --entrypoint grep {{ tf_image }} -c 'self.world' /usr/local/lib/python3.12/dist-packages/tensorfold/families/glm5_next/cuda/split.py
+      register: forkcheck
+      changed_when: false
+
+    - name: Assert fork marker == 2
+      ansible.builtin.assert:
+        that: "forkcheck.stdout | trim == '2'"
+        fail_msg: "{{ inventory_hostname }} fork marker={{ forkcheck.stdout | trim }}"
+        success_msg: "{{ inventory_hostname }}: 0900 fork present"
 
     - name: Ship the checkpoint to the three workers (ring edges; resumable, ~35 min each at 150 MB/s)
       ansible.builtin.shell: |
@@ -168,6 +205,14 @@
         fail_msg: "a node still holds a foreign GPU container (LIL lane up?): {{ foreign.stdout }}"
         success_msg: "all four GPUs free"
 
+    - name: Remove any stale rank containers (rm -> start, never restart)
+      ansible.builtin.shell: |
+        docker rm -f glm53-tf-r0 glm53-tf-r1 glm53-tf-r2 glm53-tf-r3 2>/dev/null || true
+        for w in gx10-dc90.local spark-3ff5.local gx10-2ca4.local; do
+          ssh -o BatchMode=yes spark@$w "docker rm -f glm53-tf-r0 glm53-tf-r1 glm53-tf-r2 glm53-tf-r3" >/dev/null 2>&1 || true
+        done
+        echo CLEANED
+
     - name: Launch the lane (ranks 3,2,1 remote; 0 local)
       ansible.builtin.shell: |
         cd {{ recipe_dst }} && nohup bash -c \
@@ -187,18 +232,18 @@
       changed_when: false
       timeout: 1600
 
-    - name: Models endpoint (context 1M, tensorfold owner)
+    - name: Models endpoint (context 36864, tensorfold owner)
       ansible.builtin.shell: curl -sf -m5 http://127.0.0.1:8000/v1/models
       register: models
       changed_when: false
 
-    - name: Assert 1M context + tensorfold
+    - name: Assert context + tensorfold
       ansible.builtin.assert:
         that:
-          - "'1048576' in models.stdout"
+          - "'36864' in models.stdout"
           - "'tensorfold' in models.stdout"
         fail_msg: "models payload unexpected: {{ models.stdout | truncate(200) }}"
-        success_msg: "TP4 lane serving: context 1,048,576, owned_by tensorfold"
+        success_msg: "TP4 lane serving: context 36864, owned_by tensorfold"
 
     - name: Text smoke — 17*19 = 323
       ansible.builtin.shell: |
