@@ -11,6 +11,19 @@ Reserve budget per rank: 25 GiB (OS 8 + BATCH_RESERVE 11 + session 6).
 
 ## Receipt log (newest at top)
 
+### Rung 1 — 512k × 8 slots (2026-10-01 16:54 UTC)
+- **Config**: CONTEXT=524288 · GLM53_TF_BATCH=8 · KV_POOL=4,194,304 (29.75 GiB/rank) ·
+  BATCH_RESERVE_GB=13 · HOST=127.0.0.1 (proxy = only publish point)
+- **Receipt**: `~/glm53-tf/results/rigmark/tensorfold-20261001-165437/glm53-flash-exl3-tensorfold-tp4-bench.json`
+  (label `...-tp4-bench`, comparison `2026-10-fire-tp4-hillclimb`)
+- **Results**: conc 1: 83.2 stream / 0.303s · conc 2: 95.7 agg / 55.9 stream ·
+  conc 4: 114.0 agg / 35.0 stream / TTFT 1.216s
+- **vs 384k×6 (run C)**: identical within noise at conc ≤4 — the doubled per-stream KV
+  budget is free at bench loads. Next: rung 2 (12×512k) to see where admission knobs bite.
+- **Boot notes**: dc90 disk full again (sessions grew 4.4→23G under 384k live traffic —
+  spilled KV pages); purged with sudo, 5.2G free. Session-spill growth is now the
+  watch-item for higher rungs. Boot GREEN first try.
+
 ### Rung 0 — baseline re-bench (2026-10-01, pre-ladder)
 - **Config**: CONTEXT=393216 (384k) · GLM53_TF_BATCH=6 · KV_POOL=2,359,296 (16.74 GiB/rank)
   BATCH_RESERVE_GB=11 · BATCH_PIECE=2048 · MAX_DRAFT_ROWS=16 · IMAGE=glm53-tensorfold:tp4
