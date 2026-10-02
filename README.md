@@ -1,5 +1,11 @@
 # fire — GLM-5.3-Flash-EXL3 TP=3 on the 3-Spark "fire triangle"
 
+
+> **Public mirror:** the TP=4 TensorFold fork this cluster's quad lane is built on is
+> published at [EdwardHodl/glm53-tensorfold-spark-tp4-fork](https://github.com/EdwardHodl/glm53-tensorfold-spark-tp4-fork)
+> (fork of jayleaton/glm53-tensorfold-spark; see its FORK-NOTES.md). RigMark receipts for
+> the quad TP=4 lane are in `results/rigmark/` and `TP4-HILLCLIMB-RECEIPTS.md`.
+
 > **STATUS 2026-09-26:** this README documents the TP=3 triangle era. The cluster now
 > runs the **TP=4 quad** (e116/dc90/3ff5/2ca4, alexellis lane, `quad-launcher/`); see
 > `QUAD-ALEXELLIS-PROPOSAL.md`, `TP4-MIGRATION.md` and `quad-launcher/PROGRESS.md`.
