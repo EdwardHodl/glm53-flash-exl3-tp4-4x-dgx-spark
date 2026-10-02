@@ -1,15 +1,30 @@
-# fire — GLM-5.3-Flash-EXL3 TP=3 on the 3-Spark "fire triangle"
+# fire — GLM-5.3-Flash on the 4-node quad (TP=4, QSFP switchless ring)
 
+> **2026-10-01: this cluster is now a QUAD.** Four GB10 nodes — 3× DGX Spark
+> (spark-e116, spark-3ff5, gx10-2ca4) + 1× GX10 (gx10-dc90) — wired as a
+> switchless QSFP ring (ring order **e116 (rank 0) → dc90 (1) → 3ff5 (2) →
+> 2ca4 (3) → e116**; head is spark-e116, publish point `192.168.1.6:8888`
+> via socat, engine on loopback). Two serving lanes have run on it:
+> - **TensorFold TP=4 fork, GLM-5.3-Flash-EXL3** (uncensored EXL3 checkpoint)
+>   — the hill-climb lane: rungs 1–3, RigMark runs A/B/C, ~97–100 tok/s
+>   single-stream decode, TTFT ~0.3 s. Receipts:
+>   `TP4-HILLCLIMB-RECEIPTS.md`, `results/rigmark/`, `TP4-START-RUN-LEDGER.md`.
+>   Engine: `glm53tf/` playbooks; the fork itself is
+>   [EdwardHodl/glm53-tensorfold-spark-tp4-fork](https://github.com/EdwardHodl/glm53-tensorfold-spark-tp4-fork).
+> - **vLLM alexellis lane, GLM-5.3-Flash-NVFP4** — `quad-launcher/`, config
+>   `recipe-env`/`config/prod-tp4.env`. Retired 2026-10-01 in favour of the
+>   TensorFold lane; ring, netplan and image fan-out tooling it built is
+>   shared. Ring wiring: `netplan/QUAD-RING-README.md`.
 
 > **Public mirror:** the TP=4 TensorFold fork this cluster's quad lane is built on is
 > published at [EdwardHodl/glm53-tensorfold-spark-tp4-fork](https://github.com/EdwardHodl/glm53-tensorfold-spark-tp4-fork)
 > (fork of jayleaton/glm53-tensorfold-spark; see its FORK-NOTES.md). RigMark receipts for
 > the quad TP=4 lane are in `results/rigmark/` and `TP4-HILLCLIMB-RECEIPTS.md`.
 
-> **STATUS 2026-09-26:** this README documents the TP=3 triangle era. The cluster now
-> runs the **TP=4 quad** (e116/dc90/3ff5/2ca4, alexellis lane, `quad-launcher/`); see
-> `QUAD-ALEXELLIS-PROPOSAL.md`, `TP4-MIGRATION.md` and `quad-launcher/PROGRESS.md`.
-> References below to the `../sparks/` kit are historical — that tree was retired 2026-09-26.
+> **HISTORICAL — TP=3 triangle era (2026-09-21 → 2026-09-26):** everything below this
+> note documents the earlier three-Spark TP=3 build (e116/2ca4/3ff5, EXL3 TR3-4bpw,
+> vLLM mp-executor). The `../sparks/` kit it references was retired 2026-09-26. Kept
+> for the record — the quad docs above supersede it.
 
 Three DGX Sparks in a triangle (like a fire triangle) serving
 **GLM-5.3-Flash-EXL3 (TR3-4bpw)** with vLLM mp-executor **TP=3**. Modeled on the
